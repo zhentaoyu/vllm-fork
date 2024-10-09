@@ -20,13 +20,18 @@ Workflow (disaggregated prefill)
 """
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
-if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
-
 from copy import deepcopy
 
 import torch
 from torch.distributed import Backend
+
+from vllm.utils import get_device
+
+if TYPE_CHECKING:
+    if get_device() == "hpu":
+        from vllm.worker.model_runner import ModelInputForHPUWithSamplingMetadata as ModelInput
+    else:
+        from vllm.worker.hpu_model_runner import ModelInputForGPUWithSamplingMetadata as ModelInput
 
 import vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer as sklb
 import vllm.envs as envs
@@ -51,11 +56,12 @@ IS_KV_CONSUMER: bool = (envs.VLLM_DISTRIBUTED_KV_ROLE in ["consumer", "both"])
 # When the current instance is both KV producer and KV consumer,
 # it is likely connected to a KV storage service on CPU/disk
 # so the communication backend needs to be "gloo" for that case.
+dist_backend = {"cuda": "nccl", "hpu": "hccl"}
 DISTRIBUTED_BACKEND: str = "gloo" if (IS_KV_PRODUCER
-                                      and IS_KV_CONSUMER) else "nccl"
+                                      and IS_KV_CONSUMER) else dist_backend[get_device()]
 # corresponding device
 DISTRIBUTED_DEVICE: str = "cpu" if (IS_KV_PRODUCER
-                                    and IS_KV_CONSUMER) else "cuda"
+                                    and IS_KV_CONSUMER) else get_device()
 
 
 class KV_transfer_agent:
@@ -151,7 +157,7 @@ class KV_transfer_agent:
     def send_kv_caches_and_hidden_states(
         self,
         model_executable: torch.nn.Module,
-        model_input: "ModelInputForGPUWithSamplingMetadata",
+        model_input: "ModelInput",
         kv_caches: List[torch.Tensor],
         hidden_or_intermediate_states: Union[torch.Tensor,
                                              IntermediateTensors],
@@ -204,10 +210,10 @@ class KV_transfer_agent:
 
     def recv_kv_caches_and_hidden_states(
         self, model_executable: torch.nn.Module,
-        model_input: "ModelInputForGPUWithSamplingMetadata",
+        model_input: "ModelInput",
         kv_caches: List[torch.Tensor]
     ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
-               "ModelInputForGPUWithSamplingMetadata"]:
+               "ModelInput"]:
 
         # When this flag is set to False, it means that at least for one
         # request its corresponding KV cache or hidden state is missing.
@@ -318,16 +324,16 @@ class KV_transfer_agent:
 
 
 def build_partial_prefill_input(
-    model_input: "ModelInputForGPUWithSamplingMetadata",
+    model_input: "ModelInput",
     input_tokens_list: List[torch.Tensor],
     num_computed_tokens_list: List[int],
     start_pos_list: List[int],
     slot_mapping_flat: torch.Tensor,
     device: torch.device,
-) -> "ModelInputForGPUWithSamplingMetadata":
+) -> "ModelInput":
     """
     Helper function to rebuild the model input for the current request.
-    Goal: avoid running redundant prefill on those tokens that already has KV 
+    Goal: avoid running redundant prefill on those tokens that already has KV
     caches received.
     """
     rebuilt_input_tokens = []
@@ -381,11 +387,11 @@ def build_partial_prefill_input(
         ]
         rebuilt_block_tables.append(temp_block_table)
         rebuilt_query_start_loc.append(
-            rebuilt_num_prefill_tokens)  #start with 0
+            rebuilt_num_prefill_tokens)  # start with 0
         rebuilt_context_lens_tensor.append(num_computed_token)
 
         # Sampling metadata related
-        #seq_groups (use rebuilt query lens)
+        # seq_groups (use rebuilt query lens)
         rebuilt_selected_token_indices.append(rebuilt_num_prefill_tokens - 1)
 
     # rebuilt attn_metadata
@@ -422,8 +428,11 @@ def build_partial_prefill_input(
     ).to(device)
 
     # import here to avoid circular import.
-    from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
-    rebuilt_model_input = ModelInputForGPUWithSamplingMetadata(
+    if get_device() == "hpu":
+        from vllm.worker.model_runner import ModelInputForHPUWithSamplingMetadata as ModelInput
+    else:
+        from vllm.worker.hpu_model_runner import ModelInputForGPUWithSamplingMetadata as ModelInput
+    rebuilt_model_input = ModelInput(
         input_tokens=torch.cat(rebuilt_input_tokens).to(device),
         input_positions=torch.cat(rebuilt_input_positions).to(device),
         seq_lens=model_input.seq_lens,

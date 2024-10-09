@@ -6,6 +6,7 @@ import contextlib
 import os
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -35,7 +36,8 @@ class HPUExecutor(ExecutorBase):
         """Return worker init args for a given rank."""
         if distributed_init_method is None:
             distributed_init_method = get_distributed_init_method(
-                get_ip(), get_open_port())
+                get_ip(),
+                get_open_port(force=dist_kv.IS_DISTRIBUTED_KV_INSTANCE))
         return dict(
             vllm_config=self.vllm_config,
             local_rank=local_rank,
