@@ -7,6 +7,7 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
 
 import msgspec
 
+import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
 import vllm.envs as envs
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
@@ -252,8 +253,11 @@ class RayHPUExecutor(DistributedGPUExecutor):
             # solves this issue, as it always works for communication inside
             # the node.
             driver_ip = "127.0.0.1"
+        # force vLLM to use the port specified by envs.VLLM_PORT
+        # this port will be binded by prefill instance
+        # but the decode instance must use that port to init torch.distributed
         distributed_init_method = get_distributed_init_method(
-            driver_ip, get_open_port())
+            driver_ip, get_open_port(force=dist_kv.IS_DISTRIBUTED_KV_INSTANCE))
 
         # Initialize the actual workers inside worker wrapper.
         init_worker_all_kwargs = [

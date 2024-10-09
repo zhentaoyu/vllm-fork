@@ -25,6 +25,8 @@ from vllm_hpu_extension.ops import batch2block, block2batch
 from vllm_hpu_extension.profiler import (HabanaHighLevelProfiler,
                                          HabanaMemoryProfiler, format_bytes)
 
+import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
+from vllm.distributed import get_disagg_group
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import DeviceConfig, VllmConfig
 from vllm.distributed import broadcast_tensor_dict
@@ -2028,6 +2030,24 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     input_tokens, model_input.lora_ids,
                     attn_metadata.is_prompt)
 
+        # Receive KV cache in distributed KV cache transfer setting
+        # In disagg prefill setting, it will also recv hidden states and bypass
+        # model forwarding
+        # In KV cache database setting, it will change the model input so that
+        # we can skip prefilling on tokens that successfully received KV caches
+        # NOTE: The receive operation is blocking
+        bypass_model_exec = False
+        if self.need_recv_kv(model_input, kv_caches):
+            hidden_or_intermediate_states, bypass_model_exec, model_input = \
+                get_disagg_group().recv_kv_caches_and_hidden_states(
+                    # self.model is used to know which layer the current worker
+                    # is working on, so that we can receive KV for only those
+                    # layers.
+                    self.model,
+                    model_input,
+                    kv_caches=kv_caches
+                )
+
             execute_model_kwargs = {
                 "input_ids": input_tokens,
                 "positions": input_positions,
@@ -2086,11 +2106,26 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         self.trim_attn_metadata(
                             broadcast_data["attn_metadata"])
                     })
-                with self.profiler.record_event('internal', model_event_name):
-                    hidden_states = self.model.forward(
-                        **execute_model_kwargs,
-                        selected_token_indices=sampling_metadata.
-                        selected_token_indices)
+                if not bypass_model_exec:
+                    with self.profiler.record_event('internal', model_event_name):
+                        hidden_states = self.model.forward(
+                            **execute_model_kwargs,
+                            selected_token_indices=sampling_metadata.
+                            selected_token_indices)
+                        logger.info(f"======model forward done======")
+
+                # Sending KV cache in distributed KV cache transfer setting
+                # NOTE: the send operation is non-blocking
+                if self.need_send_kv(model_input, kv_caches):
+                    get_disagg_group().send_kv_caches_and_hidden_states(
+                        # self.model is used to know which layer the current
+                        # worker is working on, so that we can send KV for only those
+                        # layers.
+                        self.model,
+                        model_input,
+                        kv_caches,
+                        hidden_or_intermediate_states,
+                    )
 
                 if self.lora_config:
                     LoraMask.setLoraMask(
@@ -2241,7 +2276,27 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         if use_async_out_proc:
             return [sampler_outputs[-1]]
         else:
-            return sampler_outputs
+            model_event_name = 'model_executable'
+
+        if not bypass_model_exec:
+            with self.profiler.record_event('internal', model_event_name):
+                hidden_states = self.model.forward(
+                    **execute_model_kwargs,
+                    selected_token_indices=sampling_metadata.selected_token_indices
+                )
+
+        # Sending KV cache in distributed KV cache transfer setting
+        # NOTE: the send operation is non-blocking
+        if self.need_send_kv(model_input, kv_caches):
+            get_disagg_group().send_kv_caches_and_hidden_states(
+                # self.model is used to know which layer the current
+                # worker is working on, so that we can send KV for only those
+                # layers.
+                self.model,
+                model_input,
+                kv_caches,
+                hidden_or_intermediate_states,
+            )
 
     def _make_decode_output(
         self,
@@ -2280,3 +2335,47 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
 
     def __del__(self):
         self.shutdown_inc()
+
+    def need_recv_kv(self, model_input, kv_caches) -> bool:
+        """Check if we need to receive kv-cache from the other worker.
+        We need to receive KV when
+            1. current vLLM instance is KV cache consumer/decode vLLM instance
+            2. this batch is not a profiling run
+            3. this batch is a prefill run
+
+        Args:
+            model_input: input to the model executable
+            kv_caches: vLLM's paged memory
+        """
+
+        prefill_meta = model_input.attn_metadata.prefill_metadata
+
+        # check if the current run is profiling
+        is_profile_run = (kv_caches is None) or (kv_caches[0] is None)
+        # check if the current run is prefill
+        is_prefill_run = prefill_meta is not None
+
+        return dist_kv.IS_KV_CONSUMER and (
+            not is_profile_run) and is_prefill_run
+
+    def need_send_kv(self, model_input, kv_caches) -> bool:
+        """Check if we need to send kv-cache to the other worker.
+        We need to send KV when
+            1. current vLLM instance is KV cache producer/prefill vLLM instance
+            2. this batch is not a profiling run
+            3. this batch is a prefill run
+
+        Args:
+            model_input: input to the model executable
+            kv_caches: vLLM's paged memory
+        """
+
+        prefill_meta = model_input.attn_metadata.prefill_metadata
+
+        # check if the current run is profiling
+        is_profile_run = (kv_caches is None) or (kv_caches[0] is None)
+        # check if the current run is prefill
+        is_prefill_run = prefill_meta is not None
+
+        return dist_kv.IS_KV_PRODUCER and (
+            not is_profile_run) and is_prefill_run
