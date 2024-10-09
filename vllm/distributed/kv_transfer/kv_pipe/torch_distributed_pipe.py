@@ -8,6 +8,10 @@ from torch.distributed import Backend
 
 from vllm.distributed.kv_transfer.kv_pipe.base import KVPipeBase
 from vllm.logger import init_logger
+from vllm.utils import get_device
+
+if get_device() == "hpu":
+    import habana_frameworks.torch.distributed.hccl
 
 logger = init_logger(__name__)
 
@@ -103,6 +107,8 @@ class TorchDistributedPipe(KVPipeBase):
     def _select_device(self, backend: Union[str, Backend]):
         if torch.cuda.is_available() and backend == Backend.NCCL:
             return torch.device(f"cuda:{self.local_rank}")
+        elif torch.hpu.is_available() and backend == Backend.HCCL:
+            return torch.device(f"hpu:{self.local_rank}")
         else:
             return "cpu"
 
