@@ -440,9 +440,11 @@ def init_worker_distributed_environment(
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
 
+    import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
     if torch.distributed.is_initialized():
         torch_world_size = torch.distributed.get_world_size()
-        if torch_world_size != parallel_config.world_size:
+        if torch_world_size != parallel_config.world_size and \
+            not dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
             raise RuntimeError(
                 "torch.distributed is already initialized but the torch world "
                 "size does not match parallel_config.world_size "
@@ -464,7 +466,7 @@ def init_worker_distributed_environment(
     device = hpu_device_string()
     dummy_tensor_hpu = torch.ones(1).to(device)
     torch.distributed.all_reduce(dummy_tensor_hpu)
-    assert dummy_tensor_hpu.item() == parallel_config.world_size
+    assert dummy_tensor_hpu.item() == torch.distributed.get_world_size()
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
 
