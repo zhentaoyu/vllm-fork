@@ -35,7 +35,6 @@ from packaging.version import Version
 from torch.library import Library
 from typing_extensions import ParamSpec, TypeIs, assert_never
 
-import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.platforms import current_platform
@@ -541,6 +540,7 @@ def get_open_port(force: bool = False) -> int:
     port = envs.VLLM_PORT
 
     if force:
+        import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
         # This flag will only be True in disaggregated prefill scenario
         # and VLLM_PORT must be set so that vLLM can connect prefill vLLM
         # instance and decode vLLM instance.
