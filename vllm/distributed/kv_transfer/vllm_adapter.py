@@ -25,10 +25,10 @@ from copy import deepcopy
 import torch
 from torch.distributed import Backend
 
-from vllm.utils import get_device
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
-    if get_device() == "hpu":
+    if current_platform.is_hpu():
         from vllm.worker.model_runner import ModelInputForHPUWithSamplingMetadata as ModelInput
     else:
         from vllm.worker.hpu_model_runner import ModelInputForGPUWithSamplingMetadata as ModelInput
@@ -56,12 +56,14 @@ IS_KV_CONSUMER: bool = (envs.VLLM_DISTRIBUTED_KV_ROLE in ["consumer", "both"])
 # When the current instance is both KV producer and KV consumer,
 # it is likely connected to a KV storage service on CPU/disk
 # so the communication backend needs to be "gloo" for that case.
-dist_backend = {"cuda": "nccl", "hpu": "hccl"}
+_device_name = "hpu" if current_platform.is_hpu() else "cuda"
+_dist_backend = {"cuda": "nccl", "hpu": "hccl"}
+
 DISTRIBUTED_BACKEND: str = "gloo" if (IS_KV_PRODUCER
-                                      and IS_KV_CONSUMER) else dist_backend[get_device()]
+                                      and IS_KV_CONSUMER) else _dist_backend[_device_name]
 # corresponding device
 DISTRIBUTED_DEVICE: str = "cpu" if (IS_KV_PRODUCER
-                                    and IS_KV_CONSUMER) else get_device()
+                                    and IS_KV_CONSUMER) else _device_name
 
 
 class KV_transfer_agent:
@@ -380,6 +382,7 @@ def build_partial_prefill_input(
         rebuilt_slot_mapping.append(new_slot_mapping)
         rebuilt_max_query_len = max(q_len, rebuilt_max_query_len)
         # TODO(Jiayi): remove hard-code (block_size=16)
+        # TODO blk_size=128 for hpu for bf16
         blk_size = 16
         temp_block_table = [
             slot_mapping_flat[i] // blk_size

@@ -8,9 +8,9 @@ from torch.distributed import Backend
 
 from vllm.distributed.kv_transfer.kv_pipe.base import KVPipeBase
 from vllm.logger import init_logger
-from vllm.utils import get_device
+from vllm.platforms import current_platform
 
-if get_device() == "hpu":
+if current_platform.is_hpu():
     import habana_frameworks.torch.distributed.hccl
 
 logger = init_logger(__name__)
