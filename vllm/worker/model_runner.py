@@ -1779,7 +1779,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         prefill_meta = model_input.attn_metadata.prefill_metadata
 
         # check if the current run is profiling
-        is_profile_run = (kv_caches is None) or (kv_caches[0] is None)
+        is_profile_run = (kv_caches[0].numel() == 0)
         # check if the current run is prefill
         is_prefill_run = prefill_meta is not None
 
@@ -1801,7 +1801,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         prefill_meta = model_input.attn_metadata.prefill_metadata
 
         # check if the current run is profiling
-        is_profile_run = (kv_caches is None) or (kv_caches[0] is None)
+        is_profile_run = (kv_caches[0].numel() == 0)
         # check if the current run is prefill
         is_prefill_run = prefill_meta is not None
 
