@@ -8,19 +8,20 @@
 # Resource: 8x Gaudi2
 # Approaches:
 # no chunked prefill since habana vllm doesn't support it yet.
-# 1. 1 vllm instance with tp=8
-# 2. 2 vllm instance with tp=4, equivalent to 1 tp=4 instance with QPS 4
-# 3. Disaggregated prefill: 1 prefilling instance and 1 decoding instance
+# 1. 2 vllm instance with tp=4, equivalent to 1 tp=4 instance with QPS 4
+# 2. Disaggregated prefill: 1 prefilling instance and 1 decoding instance
 # Prefilling instance: max_output_token=1
 # Decoding instance: force the input tokens be the same across requests to bypass prefilling
 
 set -ex
 
 kill_hpu_processes() {
-  # kill all processes on GPU.
-  pkill -f pt_main_thread
-  pkill -f python3
-  ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9
+  # kill all processes on HPU.
+  # pkill -f pt_main_thread
+  # pkill -f python3
+  # ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9
+  ps -e | grep python3 | awk '{print $1}' | xargs kill -9
+  ps -e | grep ray | awk '{print $1}' | xargs kill -9
   for port in 8000 8100 8200; do lsof -t -i:$port | xargs -r kill -9; done
   sleep 1
 }
@@ -35,8 +36,8 @@ wait_for_server() {
     done" && return 0 || return 1
 }
 
-
-launch_chunked_prefill() {
+# no chunked prefill since habana vllm doesn't support it yet.
+launch_baseline_prefill() {
   model="meta-llama/Meta-Llama-3.1-70B-Instruct"
   # disagg prefill
   HABANA_VISIBLE_MODULES="0,1,2,3" python3 \
@@ -127,8 +128,8 @@ benchmark() {
 main() {
 
   (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
-  (which jq) || (apt-get -y install jq)
-  (which socat) || (apt-get -y install socat)
+  (which jq) || (apt-get update && apt-get -y install jq)
+  (which socat) || (apt-get update && apt-get -y install socat)
 
   pip install quart httpx matplotlib aiohttp
 
@@ -151,9 +152,12 @@ main() {
   export VLLM_LOGGING_LEVEL=DEBUG
   export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
 
-  launch_chunked_prefill
+  # required to be true for tensor parallel inference with HPU Graphs
+  export PT_HPU_ENABLE_LAZY_COLLECTIVES=true
+
+  launch_baseline_prefill
   for qps in 2 4 6 8; do
-  benchmark $qps $default_output_len chunked_prefill
+  benchmark $qps $default_output_len baseline_prefill
   done
   kill_hpu_processes
 
@@ -163,7 +167,7 @@ main() {
   done
   kill_hpu_processes
 
-  python3 visualize_benchmark_results.py
+  python3 visualize_benchmark_results.py --device "hpu"
 
 }
 
