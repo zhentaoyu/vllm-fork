@@ -21,7 +21,6 @@ kill_hpu_processes() {
   # pkill -f python3
   # ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9
   ps -e | grep python3 | awk '{print $1}' | xargs kill -9
-  ps -e | grep ray | awk '{print $1}' | xargs kill -9
   for port in 8000 8100 8200; do lsof -t -i:$port | xargs -r kill -9; done
   sleep 1
 }
