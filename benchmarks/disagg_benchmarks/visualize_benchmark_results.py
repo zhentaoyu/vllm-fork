@@ -1,22 +1,38 @@
 import json
+import argparse
 
 import matplotlib.pyplot as plt
 import pandas as pd
 
 if __name__ == "__main__":
 
+    parser = argparse.ArgumentParser(description="visualize_benchmark_results args.")
+    parser.add_argument("--device",
+                        type=str,
+                        default="cuda",
+                        help="device to run the benchmark")
+    parser.add_argument("--results_dir",
+                        type=str,
+                        default="results",
+                        help="directory to load and save the benchmark results.")
+    args = parser.parse_args()
+
     data = []
-    for name in ['disagg_prefill', 'chunked_prefill']:
+    label = ['disagg_prefill', 'chunked_prefill']
+    if args.device == "hpu":
+        label = ['disagg_prefill', 'baseline_prefill']
+
+    for name in label:
         for qps in [2, 4, 6, 8]:
-            with open(f"results/{name}-qps-{qps}.json", "r") as f:
+            with open(f"{args.results_dir}/{name}-qps-{qps}.json", "r") as f:
                 x = json.load(f)
                 x['name'] = name
                 x['qps'] = qps
                 data.append(x)
 
     df = pd.DataFrame.from_dict(data)
-    dis_df = df[df['name'] == 'disagg_prefill']
-    chu_df = df[df['name'] == 'chunked_prefill']
+    dis_df = df[df['name'] == label[0]]
+    chu_df = df[df['name'] == label[1]]
 
     plt.style.use('bmh')
     plt.rcParams['font.size'] = 20
@@ -29,12 +45,12 @@ if __name__ == "__main__":
         fig, ax = plt.subplots(figsize=(11, 7))
         plt.plot(dis_df['qps'],
                  dis_df[key],
-                 label='disagg_prefill',
+                 label=label[0],
                  marker='o',
                  linewidth=4)
         plt.plot(chu_df['qps'],
                  chu_df[key],
-                 label='chunked_prefill',
+                 label=label[1],
                  marker='o',
                  linewidth=4)
         ax.legend()
@@ -42,5 +58,5 @@ if __name__ == "__main__":
         ax.set_xlabel('QPS')
         ax.set_ylabel(key)
         ax.set_ylim(bottom=0)
-        fig.savefig(f'results/{key}.png')
+        fig.savefig(f'{args.results_dir}/{key}.png')
         plt.close(fig)
