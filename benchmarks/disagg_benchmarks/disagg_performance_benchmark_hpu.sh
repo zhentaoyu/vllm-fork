@@ -153,6 +153,20 @@ main() {
 
   # required to be true for tensor parallel inference with HPU Graphs
   export PT_HPU_ENABLE_LAZY_COLLECTIVES=true
+  # for hpu graphs warmup
+  export VLLM_PROMPT_BS_BUCKET_MIN=1      # (default:1)
+  export VLLM_PROMPT_BS_BUCKET_STEP=4     # (default:32)
+  export VLLM_PROMPT_BS_BUCKET_MAX=32     # (default:64)
+
+  # input_len - 2*prefix_len ~ input_len + 2*prefix_len
+  # divisible by block_size 128
+  export VLLM_PROMPT_SEQ_BUCKET_MIN=896   # (default:128)
+  export VLLM_PROMPT_SEQ_BUCKET_STEP=128  # (default:128)
+  export VLLM_PROMPT_SEQ_BUCKET_MAX=1152  # (default:1024)
+
+  export VLLM_DECODE_BS_BUCKET_MIN=1      # (default:1)
+  export VLLM_DECODE_BS_BUCKET_STEP=4     # (default:32)
+  export VLLM_DECODE_BS_BUCKET_MAX=64     # (default:256)
 
   launch_baseline_prefill
   for qps in 2 4 6 8; do
