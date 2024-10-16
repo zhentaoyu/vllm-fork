@@ -2088,12 +2088,12 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         # NOTE: The receive operation is blocking
         bypass_model_exec = False
         if self.need_recv_kv(model_input, kv_caches):
-            hidden_or_intermediate_states, bypass_model_exec, model_input = \
+            hidden_states, bypass_model_exec, model_input = \
                 get_disagg_group().recv_kv_caches_and_hidden_states(
                     # self.model is used to know which layer the current worker
                     # is working on, so that we can receive KV for only those
                     # layers.
-                    self.model,
+                    self.model.model,
                     model_input,
                     kv_caches=kv_caches
                 )
@@ -2332,10 +2332,10 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 # self.model is used to know which layer the current
                 # worker is working on, so that we can send KV for only those
                 # layers.
-                self.model,
+                self.model.model,
                 model_input,
                 kv_caches,
-                hidden_or_intermediate_states,
+                hidden_states,
             )
 
     def _make_decode_output(
@@ -2388,13 +2388,14 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
             kv_caches: vLLM's paged memory
         """
 
-        prefill_meta = model_input.attn_metadata.prefill_metadata
-
         # check if the current run is profiling
         # is_profile_run = (kv_caches[0].numel() == 0)
         is_profile_run = (kv_caches is None) or (kv_caches[0] is None)
         # check if the current run is prefill
-        is_prefill_run = prefill_meta is not None
+        # Currently, input sequences can only contain all prompts
+        # or all decoding. True if all sequences are prompts.
+        is_prefill_run = model_input.attn_metadata.is_prompt
+        logger.info(f"in need_recv_kv, dist_kv.IS_KV_CONSUMER {dist_kv.IS_KV_CONSUMER}, is_profile_run {is_profile_run}, is_prefill_run {is_prefill_run}")
 
         return dist_kv.IS_KV_CONSUMER and (
             not is_profile_run) and is_prefill_run
@@ -2411,13 +2412,13 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
             kv_caches: vLLM's paged memory
         """
 
-        prefill_meta = model_input.attn_metadata.prefill_metadata
-
         # check if the current run is profiling
         # is_profile_run = (kv_caches[0].numel() == 0)
         is_profile_run = (kv_caches is None) or (kv_caches[0] is None)
         # check if the current run is prefill
-        is_prefill_run = prefill_meta is not None
+        # Currently, input sequences can only contain all prompts
+        # or all decoding. True if all sequences are prompts.
+        is_prefill_run = model_input.attn_metadata.is_prompt
 
         return dist_kv.IS_KV_PRODUCER and (
             not is_profile_run) and is_prefill_run
