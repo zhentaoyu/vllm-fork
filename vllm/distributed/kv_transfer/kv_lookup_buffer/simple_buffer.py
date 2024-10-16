@@ -48,8 +48,10 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
 
         tokens_sender = tokens_roi_sender[0]
         tokens_recver = tokens_roi_recver[0]
-        roi_sender = tokens_roi_sender[1]
-        roi_recver = tokens_roi_recver[1]
+        # assuming it's a bool mask
+        # hccl can not send bool, so use int type instead
+        roi_sender = tokens_roi_sender[1].to(bool)
+        roi_recver = tokens_roi_recver[1].to(bool)
 
         if tokens_recver is None:
             # consumer sends an empty request

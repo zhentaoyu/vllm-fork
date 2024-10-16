@@ -19,18 +19,31 @@ logger = init_logger(__name__)
 # this means that the sended object is None.
 NONE_INT = -150886311
 
-# Mapping tensor dtype to INT64, used for tensor metadata transmission
-FLOAT16_INT = -543205003776624
-INT64_INT = -375623078607432
-BOOL_INT = -28035262008646
-BFLOAT16_INT = -452084912267662
-FLOAT32_INT = -1049557997456592
-FLOAT64_INT = -452201007054137
-FLOAT8_E4M3FN_INT = -1066697177659525
-FLOAT8_E5M2_INT = -618182574682355
+## Mapping tensor dtype to INT64, used for tensor metadata transmission
+# FLOAT16_INT = -543205003776624
+# INT64_INT = -375623078607432
+# BOOL_INT = -28035262008646
+# BFLOAT16_INT = -452084912267662
+# FLOAT32_INT = -1049557997456592
+# FLOAT64_INT = -452201007054137
+# FLOAT8_E4M3FN_INT = -1066697177659525
+# FLOAT8_E5M2_INT = -618182574682355
+
+# add int32
+# Mapping tensor dtype to INT32 (for hccl compatibility), used for tensor metadata transmission
+FLOAT16_INT = -543205003
+INT32_INT = -159742346
+INT64_INT = -37562307
+BOOL_INT = -280352620
+BFLOAT16_INT = -452084912
+FLOAT32_INT = -104955799
+FLOAT64_INT = -452201007
+FLOAT8_E4M3FN_INT = -106669717
+FLOAT8_E5M2_INT = -618182574
 
 DTYPE2INT = {
     torch.float16: FLOAT16_INT,
+    torch.int32: INT32_INT,
     torch.int64: INT64_INT,
     torch.bool: BOOL_INT,
     torch.bfloat16: BFLOAT16_INT,
@@ -42,6 +55,7 @@ DTYPE2INT = {
 
 INT2DTYPE = {
     FLOAT16_INT: torch.float16,
+    INT32_INT: torch.int32,
     INT64_INT: torch.int64,
     BOOL_INT: torch.bool,
     BFLOAT16_INT: torch.bfloat16,
@@ -62,7 +76,8 @@ class BrokenPipeException(Exception):
 class TorchDistributedPipe(KVPipeBase):
     METADATA_LENGTH = 16
     MAX_TENSOR_DIMENSIONS = 14
-    METADATA_DTYPE = torch.int64
+    # use INT32 for hccl compatibility
+    METADATA_DTYPE = torch.int32
 
     def __init__(
         self,
@@ -194,8 +209,13 @@ class TorchDistributedPipe(KVPipeBase):
             - tensor: the input tensor to be sent
         """
 
+        logger.info(f"_make_metadata")
+        logger.info(f"self.local_rank {self.local_rank}, self.device {self.device}, torch device {tensor.device}")
         metadata = self._make_metadata(tensor)
+        logger.info(f"_send_metadata")
         self._send_metadata(metadata)
+        logger.info(f"torch.distributed.send tensor data")
+        logger.info(f"torch.distributed.backend {torch.distributed.get_backend()}")
         torch.distributed.send(tensor.to(self.device),
                                dst=self.target_rank_for_send,
                                group=self.device_group)
