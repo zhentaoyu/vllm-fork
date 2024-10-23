@@ -35,7 +35,6 @@ if TYPE_CHECKING:
 
 import vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer as sklb
 import vllm.envs as envs
-from vllm import _custom_ops as ops
 from vllm.distributed.kv_transfer.kv_lookup_buffer.base import (
     KVLookupBufferBase)
 from vllm.distributed.kv_transfer.kv_pipe.torch_distributed_pipe import (
@@ -99,6 +98,7 @@ class KV_transfer_agent:
             # So we build both send pipe and recv pipe for simplicity.
             if IS_KV_PRODUCER:
 
+                logger.info(f"kv producer local_rank {local_rank}, group_rank {group_ranks}")
                 self.send_pipe = TorchDistributedPipe(
                     group_ranks,
                     local_rank,
@@ -131,6 +131,7 @@ class KV_transfer_agent:
                 # the current vLLM instance is KV consumer, so it needs to connect
                 # its recv pipe to the send pipe of KV producder
 
+                logger.info(f"kv consumer local_rank {local_rank}, group_rank {group_ranks}")
                 self.recv_pipe = TorchDistributedPipe(
                     group_ranks,
                     local_rank,
@@ -178,10 +179,10 @@ class KV_transfer_agent:
     ) -> None:
 
         input_tokens_tensor = model_input.input_tokens
-        seq_lens = model_input.seq_lens if _device_name=="hpu" else \
-            model_input.attn_metadata.seq_lens
-        slot_mapping_flat = model_input.attn_metadata.slot_mapping.flatten()
-        logger.info(f"model_executable {model_executable}")
+        seq_lens = model_input.attn_metadata.seq_lens_tensor.to("cpu").tolist() if \
+            _device_name=="hpu" else model_input.attn_metadata.seq_lens
+        slot_mapping = model_input.attn_metadata.slot_mapping
+        slot_mapping_flat = slot_mapping.flatten()
         try:
             start_layer = model_executable.model.start_layer
             end_layer = model_executable.model.end_layer
@@ -194,9 +195,15 @@ class KV_transfer_agent:
         # so we will send them to decode instance
         # FIXME(Kuntai): This assume that all requests are prefill.
         for idx, slen in enumerate(seq_lens):
-            start_pos = sum(seq_lens[:idx])
+            start_pos = 0 if _device_name == "hpu" else sum(seq_lens[:idx])
             end_pos = start_pos + slen
-            current_tokens = input_tokens_tensor[start_pos:end_pos]
+            # select tokens
+            # TODO assuming hpu use [bs, seqlen + padding] in prefill stage
+            if _device_name == "hpu":
+                select_index = torch.arange(start_pos, end_pos, device=input_tokens_tensor.device)
+                current_tokens = input_tokens_tensor[idx].index_select(-1, select_index)
+            else:
+                current_tokens = input_tokens_tensor[start_pos:end_pos]
 
             keys, values = [], []
 
@@ -208,19 +215,27 @@ class KV_transfer_agent:
                 key_cache = kv_cache[0].reshape(-1, num_heads, head_size)
                 value_cache = kv_cache[1].reshape(-1, num_heads, head_size)
 
-                current_slot_mapping = slot_mapping_flat[start_pos:end_pos]
+                if _device_name == "hpu":
+                    padding_seq_len = input_tokens_tensor.shape[-1]
+                    current_slot_mapping = slot_mapping[idx][start_pos:padding_seq_len]
+                else:
+                    current_slot_mapping = slot_mapping_flat[start_pos:end_pos]
 
                 keys.append(key_cache[current_slot_mapping].unsqueeze(0))
                 values.append(value_cache[current_slot_mapping].unsqueeze(0))
 
             keys = torch.cat(keys, dim=0)
             values = torch.cat(values, dim=0)
+            # (maybe) trim_logits in hpu
+            if _device_name == "hpu":
+                hidden_send = hidden_or_intermediate_states[idx].reshape(1, -1)
+            else:
+                hidden_send = hidden_or_intermediate_states[start_pos:end_pos]
             if self.send_buffer is not None:
                 # hccl can not send bool, so use int type instead
                 self.send_buffer.insert(
-                    current_tokens, torch.ones_like(current_tokens,
-                                                    dtype=torch.int32), keys, values,
-                    hidden_or_intermediate_states[start_pos:end_pos])
+                    current_tokens, torch.ones_like(current_tokens, dtype=torch.int32),
+                    keys, values, hidden_send)
 
         logger.debug("[rank%d]: KV send DONE.", torch.distributed.get_rank())
 
@@ -244,8 +259,8 @@ class KV_transfer_agent:
         bypass_model_exec = True
 
         input_tokens_tensor = model_input.input_tokens
-        seq_lens = model_input.seq_lens if _device_name=="hpu" else \
-            model_input.attn_metadata.seq_lens
+        seq_lens = model_input.attn_metadata.seq_lens_tensor.to("cpu").tolist() if \
+            _device_name=="hpu" else model_input.attn_metadata.seq_lens
         slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
 
         hidden_or_intermediate_states_for_one_req = []
@@ -264,11 +279,22 @@ class KV_transfer_agent:
 
         # enumerate different requests
         # FIXME(Kuntai): This impl assumes that all requests are prefill.
+        logger.info(f"seq_lens tensor {seq_lens}")
+        # TODO for hpu, other block_size
+        kv_block_bs_idx = 0
+        kv_block_size = 128
+        block_num = torch.div(input_tokens_tensor.size(-1),
+                              kv_block_size, rounding_mode="floor")
         for idx, slen in enumerate(seq_lens):
 
-            start_pos = sum(seq_lens[:idx])
+            # TODO assuming hpu use [bs, seqlen + padding] in prefill stage
+            start_pos = 0 if _device_name == "hpu" else sum(seq_lens[:idx])
             end_pos = start_pos + slen
-            current_tokens = input_tokens_tensor[start_pos:end_pos]
+            if _device_name == "hpu":
+                select_index = torch.arange(start_pos, end_pos, device=input_tokens_tensor.device)
+                current_tokens = input_tokens_tensor[idx].index_select(-1, select_index)
+            else:
+                current_tokens = input_tokens_tensor[start_pos:end_pos]
             num_tokens = slen
 
             # collecting data for rebuilding the input
@@ -280,7 +306,9 @@ class KV_transfer_agent:
                 break
 
             logger.info(f"start to drop select...")
-            logger.info(f"input_tokens {current_tokens}")
+            logger.info(f"start_pos {start_pos}, slen {slen}")
+            # logger.info(f"input_tokens_tensor {input_tokens_tensor}")
+            # logger.info(f"input_tokens {current_tokens}")
             # hccl can not send bool, so use int type instead
             ret = self.recv_buffer.drop_select(
                 current_tokens, torch.ones_like(current_tokens, dtype=torch.int32))
@@ -295,11 +323,12 @@ class KV_transfer_agent:
             values: torch.Tensor = ret[3]
             hidden: torch.Tensor = ret[4]
 
-            num_computed_tokens = roi.shape[0]
+            num_computed_tokens = roi.shape[-1]
             num_computed_tokens_list.append(num_computed_tokens)
 
             # check if both KV cache and the hidden states are received
             # If not, need to redo the forwarding to compute missing states
+            logger.info(f"num_computed_tokens {num_computed_tokens}, num_tokens {num_tokens}")
             if not all([(num_computed_tokens == num_tokens), hidden is not None
                         ]):
                 bypass_model_exec = False
@@ -314,17 +343,40 @@ class KV_transfer_agent:
                 layer = model_executable.model.layers[i]
 
                 key_cache, value_cache = kv_cache[0], kv_cache[1]
-                ops.reshape_and_cache_flash(
-                    keys[i - start_layer].to(key_cache.device),
-                    values[i - start_layer].to(value_cache.device),
-                    key_cache,
-                    value_cache,
-                    slot_mapping[start_pos:end_pos],
-                    layer.self_attn.attn.kv_cache_dtype,
-                    layer.self_attn.attn._k_scale,
-                    layer.self_attn.attn._v_scale,
-                )
+                if _device_name == "hpu":
+                    from vllm_hpu_extension import cache_ops as ops
+                    block_indices = model_input.attn_metadata.block_indices[kv_block_bs_idx:
+                                                    kv_block_size + block_num].reshape(-1)
+                    block_offsets = model_input.attn_metadata.block_offsets
+                    if block_offsets is not None:
+                        block_offsets = block_offsets[kv_block_bs_idx:
+                                                      kv_block_bs_idx + block_num].reshape(-1)
+                    key = keys[i - start_layer].to(key_cache.device)
+                    value = values[i - start_layer].to(value_cache.device)
+                    key = key.unflatten(0, (block_indices.size(0), -1))
+                    value = value.unflatten(0, (block_indices.size(0), -1))
+                    key_cache = ops.insert_or_update_cache(key,
+                                                           key_cache,
+                                                           block_indices,
+                                                           block_offsets)
+                    value_cache = ops.insert_or_update_cache(value,
+                                                             value_cache,
+                                                             block_indices,
+                                                             block_offsets)
+                else:
+                    from vllm import _custom_ops as ops
+                    ops.reshape_and_cache_flash(
+                        keys[i - start_layer].to(key_cache.device),
+                        values[i - start_layer].to(value_cache.device),
+                        key_cache,
+                        value_cache,
+                        slot_mapping[start_pos:end_pos],
+                        layer.self_attn.attn.kv_cache_dtype,
+                        layer.self_attn.attn._k_scale,
+                        layer.self_attn.attn._v_scale,
+                    )
 
+            kv_block_bs_idx += block_num
             hidden_or_intermediate_states_for_one_req.append(hidden)
 
         if not bypass_model_exec:

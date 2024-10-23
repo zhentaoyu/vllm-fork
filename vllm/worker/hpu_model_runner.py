@@ -2091,6 +2091,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         # NOTE: The receive operation is blocking
         bypass_model_exec = False
         if self.need_recv_kv(model_input, kv_caches):
+            logger.info(f"start to recev kv.........")
             hidden_states, bypass_model_exec, model_input = \
                 get_disagg_group().recv_kv_caches_and_hidden_states(
                     # self.model is used to know which layer the current worker
@@ -2334,10 +2335,13 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     **execute_model_kwargs,
                     selected_token_indices=sampling_metadata.selected_token_indices
                 )
+                logger.info(f"hidden [0][:3] {hidden_states[0][:3]}")
+                logger.info(f"=====model forward done======")
 
         # Sending KV cache in distributed KV cache transfer setting
         # NOTE: the send operation is non-blocking
         if self.need_send_kv(model_input, kv_caches):
+            logger.info(f"start to send kv.........")
             get_disagg_group().send_kv_caches_and_hidden_states(
                 # self.model is used to know which layer the current
                 # worker is working on, so that we can send KV for only those
