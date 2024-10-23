@@ -152,7 +152,9 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
                         # in case the tensor is freed before sending finishes
                         matched_item = self.buffer.popleft()
                         for tensor in matched_item:
+                            logger.info(f"send to consumer ins tensor shape {tensor.shape}")
                             self._send_tensor_and_dec_size(tensor)
+                        logger.info(f"send done")
 
                     else:
                         # no match, just send None
@@ -178,15 +180,24 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
         if isinstance(roi, torch.Tensor):
             roi = roi.clone()
 
+        logger.info(f"kv comsumer send normal_signal")
         self.signal_pipe.send_tensor(self.normal_signal)
+        logger.info(f"kv comsumer send input_tokens")
         self.data_pipe.send_tensor(input_tokens)
+        logger.info(f"kv comsumer send roi")
         self.data_pipe.send_tensor(roi)
 
         input_tokens = self.data_pipe.recv_tensor()
+        logger.info(f"recv from producer ins input_tokens shape {input_tokens.shape}")
         roi = self.data_pipe.recv_tensor()
+        logger.info(f"recv from producer ins roi shape {roi.shape}")
         key = self.data_pipe.recv_tensor()
+        logger.info(f"recv from producer ins key shape {key.shape}")
         value = self.data_pipe.recv_tensor()
+        logger.info(f"recv from producer ins value shape {value.shape}")
         hidden = self.data_pipe.recv_tensor()
+        logger.info(f"recv from producer ins hidden shape {hidden.shape}")
+        logger.info(f"recv done")
 
         return [input_tokens, roi, key, value, hidden]
 

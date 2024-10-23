@@ -122,8 +122,9 @@ class TorchDistributedPipe(KVPipeBase):
     def _select_device(self, backend: Union[str, Backend]):
         if torch.cuda.is_available() and backend == Backend.NCCL:
             return torch.device(f"cuda:{self.local_rank}")
+        # TODO "hpu:X" notation is not supported by Gaudi PyTorch intergration bridge
         elif torch.hpu.is_available() and backend == Backend.HCCL:
-            return torch.device(f"hpu:{self.local_rank}")
+            return torch.device(f"hpu")
         else:
             return "cpu"
 
@@ -208,14 +209,10 @@ class TorchDistributedPipe(KVPipeBase):
         Parameters:
             - tensor: the input tensor to be sent
         """
-
-        logger.info(f"_make_metadata")
-        logger.info(f"self.local_rank {self.local_rank}, self.device {self.device}, torch device {tensor.device}")
         metadata = self._make_metadata(tensor)
-        logger.info(f"_send_metadata")
+        logger.info(f"_send_metadata metadata {metadata}")
+        logger.info(f"self.local_rank {self.local_rank}, self.device {self.device}, torch device {tensor.device}, target_rank_for_send {self.target_rank_for_send}")
         self._send_metadata(metadata)
-        logger.info(f"torch.distributed.send tensor data")
-        logger.info(f"torch.distributed.backend {torch.distributed.get_backend()}")
         torch.distributed.send(tensor.to(self.device),
                                dst=self.target_rank_for_send,
                                group=self.device_group)
@@ -231,6 +228,8 @@ class TorchDistributedPipe(KVPipeBase):
             - buffer: the received tensor, on self.device
         """
         d_metadata = self._recv_metadata()
+        logger.info(f"_recv_metadata metadata {d_metadata}")
+        logger.info(f"self.local_rank {self.local_rank}, self.device {self.device}, target_rank_for_recv {self.target_rank_for_recv}")
         buffer = self._prepare_recv_buffer(d_metadata)
 
         torch.distributed.recv(buffer,
