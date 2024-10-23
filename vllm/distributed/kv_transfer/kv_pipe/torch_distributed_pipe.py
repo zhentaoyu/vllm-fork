@@ -210,9 +210,13 @@ class TorchDistributedPipe(KVPipeBase):
             - tensor: the input tensor to be sent
         """
         metadata = self._make_metadata(tensor)
-        logger.info(f"_send_metadata metadata {metadata}")
-        logger.info(f"self.local_rank {self.local_rank}, self.device {self.device}, torch device {tensor.device}, target_rank_for_send {self.target_rank_for_send}")
+        logger.debug(f"torch.distributed backend local_rank: {self.local_rank}, "\
+                     f"rank: {self.rank} start to send metadata {metadata} "\
+                     f"to rank: {self.target_rank_for_send}")
         self._send_metadata(metadata)
+        logger.debug(f"torch.distributed backend local_rank: {self.local_rank}, "\
+                     f"rank: {self.rank} start to send tensor with shape {tensor.shape} "\
+                     f"to rank: {self.target_rank_for_send}")
         torch.distributed.send(tensor.to(self.device),
                                dst=self.target_rank_for_send,
                                group=self.device_group)
@@ -228,10 +232,14 @@ class TorchDistributedPipe(KVPipeBase):
             - buffer: the received tensor, on self.device
         """
         d_metadata = self._recv_metadata()
-        logger.info(f"_recv_metadata metadata {d_metadata}")
-        logger.info(f"self.local_rank {self.local_rank}, self.device {self.device}, target_rank_for_recv {self.target_rank_for_recv}")
+        logger.debug(f"torch.distributed backend local_rank: {self.local_rank}, "\
+                     f"rank: {self.rank} start to receive metadata {d_metadata} "\
+                     f"from rank: {self.target_rank_for_recv}")
         buffer = self._prepare_recv_buffer(d_metadata)
 
+        logger.debug(f"torch.distributed backend local_rank: {self.local_rank}, "\
+                     f"rank: {self.rank} start to receive tensor with shape {buffer.shape} "\
+                     f"from rank: {self.target_rank_for_recv}")
         torch.distributed.recv(buffer,
                                src=self.target_rank_for_recv,
                                group=self.device_group)
