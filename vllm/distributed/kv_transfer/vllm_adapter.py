@@ -333,6 +333,11 @@ class KV_transfer_agent:
                         ]):
                 bypass_model_exec = False
 
+            # skip finding if one batch is missing in hpu
+            # TODO batch reduction if find a completed single batch
+            if not bypass_model_exec and _device_name == "hpu":
+                break
+
             # update the end position based on how many tokens are cached.
             end_pos = start_pos + num_computed_tokens
 
@@ -385,16 +390,20 @@ class KV_transfer_agent:
             logger.debug(
                 "[rank%d]: Failed to receive all KVs and hidden "
                 "states, redo model forwarding.", torch.distributed.get_rank())
-            rebuilt_model_input = build_partial_prefill_input(
-                model_input,
-                input_tokens_list,
-                num_computed_tokens_list,
-                start_pos_list,
-                slot_mapping,
-                device=input_tokens_tensor.device,
-            )
-            model_input = rebuilt_model_input
-            hidden_or_intermediate_states = None
+            # TODO HPU partial input may be complicated under (bs, padded_len) input shape
+            if _device_name == "hpu":
+                hidden_or_intermediate_states = None
+            else:
+                rebuilt_model_input = build_partial_prefill_input(
+                    model_input,
+                    input_tokens_list,
+                    num_computed_tokens_list,
+                    start_pos_list,
+                    slot_mapping,
+                    device=input_tokens_tensor.device,
+                )
+                model_input = rebuilt_model_input
+                hidden_or_intermediate_states = None
 
         else:
             logger.debug(
@@ -405,7 +414,6 @@ class KV_transfer_agent:
 
         return hidden_or_intermediate_states, bypass_model_exec, model_input
 
-# TODO: FOR HPU
 def build_partial_prefill_input(
     model_input: "ModelInput",
     input_tokens_list: List[torch.Tensor],
@@ -512,10 +520,7 @@ def build_partial_prefill_input(
     ).to(device)
 
     # import here to avoid circular import.
-    if _device_name == "hpu":
-        from vllm.worker.model_runner import ModelInputForHPUWithSamplingMetadata as ModelInput
-    else:
-        from vllm.worker.hpu_model_runner import ModelInputForGPUWithSamplingMetadata as ModelInput
+    from vllm.worker.hpu_model_runner import ModelInputForGPUWithSamplingMetadata as ModelInput
     rebuilt_model_input = ModelInput(
         input_tokens=torch.cat(rebuilt_input_tokens).to(device),
         input_positions=torch.cat(rebuilt_input_positions).to(device),
