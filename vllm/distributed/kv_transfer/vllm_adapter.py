@@ -87,7 +87,10 @@ class KV_transfer_agent:
         self.send_buffer: Optional[KVLookupBufferBase] = None
         self.recv_buffer: Optional[KVLookupBufferBase] = None
 
-        self.kv_transfer_driver = "simple_buffer"  # "simple_buffer"
+        assert envs.VLLM_KV_TRANSFER_DRIVER in ["simple_buffer", "disk_kv_transfer"], \
+            "VLLM_KV_TRANSFER_DRIVER can only be simple_buffer or disk_kv_transfer."
+        self.kv_transfer_driver = envs.VLLM_KV_TRANSFER_DRIVER
+        logger.debug(f"kv_transfer_driver is {self.kv_transfer_driver}")
 
         if self.kv_transfer_driver == "simple_buffer":
             SimpleKVLookupBuffer = sklb.SimpleKVLookupBuffer
@@ -98,7 +101,6 @@ class KV_transfer_agent:
             # So we build both send pipe and recv pipe for simplicity.
             if IS_KV_PRODUCER:
 
-                logger.info(f"kv producer local_rank {local_rank}, group_rank {group_ranks}")
                 self.send_pipe = TorchDistributedPipe(
                     group_ranks,
                     local_rank,
@@ -131,7 +133,6 @@ class KV_transfer_agent:
                 # the current vLLM instance is KV consumer, so it needs to connect
                 # its recv pipe to the send pipe of KV producder
 
-                logger.info(f"kv consumer local_rank {local_rank}, group_rank {group_ranks}")
                 self.recv_pipe = TorchDistributedPipe(
                     group_ranks,
                     local_rank,
@@ -163,8 +164,8 @@ class KV_transfer_agent:
         elif self.kv_transfer_driver == "disk_kv_transfer":
             from vllm.distributed.kv_transfer.kv_lookup_buffer.disk_kv_transfer import DiskKVTransfer
 
-            self.send_buffer = DiskKVTransfer("", local_rank)
-            self.recv_buffer = DiskKVTransfer("", local_rank)
+            self.send_buffer = DiskKVTransfer(local_rank)
+            self.recv_buffer = DiskKVTransfer(local_rank)
 
         else:
             raise ValueError("Invalid kv_transfer_driver.")
@@ -232,6 +233,7 @@ class KV_transfer_agent:
             else:
                 hidden_send = hidden_or_intermediate_states[start_pos:end_pos]
             if self.send_buffer is not None:
+                logger.debug(f"KV_PRODUCER starts to send kv")
                 # hccl can not send bool, so use int type instead
                 self.send_buffer.insert(
                     current_tokens, torch.ones_like(current_tokens, dtype=torch.int32),
@@ -307,8 +309,7 @@ class KV_transfer_agent:
 
             logger.info(f"start to drop select...")
             logger.info(f"start_pos {start_pos}, slen {slen}")
-            # logger.info(f"input_tokens_tensor {input_tokens_tensor}")
-            # logger.info(f"input_tokens {current_tokens}")
+            logger.debug(f"KV_CONSUMER starts to receive kv")
             # hccl can not send bool, so use int type instead
             ret = self.recv_buffer.drop_select(
                 current_tokens, torch.ones_like(current_tokens, dtype=torch.int32))
@@ -328,7 +329,6 @@ class KV_transfer_agent:
 
             # check if both KV cache and the hidden states are received
             # If not, need to redo the forwarding to compute missing states
-            logger.info(f"num_computed_tokens {num_computed_tokens}, num_tokens {num_tokens}")
             if not all([(num_computed_tokens == num_tokens), hidden is not None
                         ]):
                 bypass_model_exec = False

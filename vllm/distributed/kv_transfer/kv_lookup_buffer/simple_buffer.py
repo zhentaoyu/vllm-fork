@@ -95,14 +95,24 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
 
         if isinstance(input_tokens, torch.Tensor):
             input_tokens = input_tokens.clone()
+            logger.debug(f"KV_PRODUCER starts to add input_tokens with shape "\
+                         f"{input_tokens.shape} into buffer")
         if isinstance(roi, torch.Tensor):
             roi = roi.clone()
+            logger.debug(f"KV_PRODUCER starts to add roi with shape "\
+                         f"{roi.shape} into buffer")
         if isinstance(key, torch.Tensor):
             key = key.clone()
+            logger.debug(f"KV_PRODUCER starts to add key with shape "\
+                         f"{key.shape} into buffer")
         if isinstance(value, torch.Tensor):
             value = value.clone()
+            logger.debug(f"KV_PRODUCER starts to add value with shape "\
+                         f"{value.shape} into buffer")
         if isinstance(hidden, torch.Tensor):
             hidden = hidden.clone()
+            logger.debug(f"KV_PRODUCER starts to add hidden with shape "\
+                         f"{hidden.shape} into buffer")
 
         buffer_item = [input_tokens, roi, key, value, hidden]
 
@@ -110,6 +120,7 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
             for data in buffer_item:
                 self.buffer_size += self._get_element_size(data)
             self.buffer.append(buffer_item)
+            logger.debug(f"KV_PRODUCER finishs adding tensors into buffer")
 
     def _is_end_signal(self, signal):
         return signal is None
@@ -151,13 +162,14 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
                         # need to clone the tensor
                         # in case the tensor is freed before sending finishes
                         matched_item = self.buffer.popleft()
+                        logger.debug(f"KV_PRODUCER finds a matched item in buffer")
                         for tensor in matched_item:
-                            logger.info(f"send to consumer ins tensor shape {tensor.shape}")
+                            logger.debug(f"KV_PRODUCER starts to send matched item to KV_CONSUMER")
                             self._send_tensor_and_dec_size(tensor)
-                        logger.info(f"send done")
 
                     else:
                         # no match, just send None
+                        logger.debug(f"KV_PRODUCER finds no matched item in buffer, sending None")
                         for _ in range(5):
                             self.data_pipe.send_tensor(None)
 
@@ -180,24 +192,24 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
         if isinstance(roi, torch.Tensor):
             roi = roi.clone()
 
-        logger.info(f"kv comsumer send normal_signal")
         self.signal_pipe.send_tensor(self.normal_signal)
-        logger.info(f"kv comsumer send input_tokens")
+        logger.debug(f"KV_CONSUMER starts to send input_tokens with shape "\
+                     f"{input_tokens.shape} to KV_PRODUCER")
         self.data_pipe.send_tensor(input_tokens)
-        logger.info(f"kv comsumer send roi")
+        logger.debug(f"KV_CONSUMER starts to send roi with shape "\
+                     f"{roi.shape} to KV_PRODUCER")
         self.data_pipe.send_tensor(roi)
 
+        logger.debug(f"KV_CONSUMER starts to receives input_tokens from KV_PRODUCER")
         input_tokens = self.data_pipe.recv_tensor()
-        logger.info(f"recv from producer ins input_tokens shape {input_tokens.shape}")
+        logger.debug(f"KV_CONSUMER starts to receives roi from KV_PRODUCER")
         roi = self.data_pipe.recv_tensor()
-        logger.info(f"recv from producer ins roi shape {roi.shape}")
+        logger.debug(f"KV_CONSUMER starts to receives key from KV_PRODUCER")
         key = self.data_pipe.recv_tensor()
-        logger.info(f"recv from producer ins key shape {key.shape}")
+        logger.debug(f"KV_CONSUMER starts to receives value from KV_PRODUCER")
         value = self.data_pipe.recv_tensor()
-        logger.info(f"recv from producer ins value shape {value.shape}")
+        logger.debug(f"KV_CONSUMER starts to receives hidden from KV_PRODUCER")
         hidden = self.data_pipe.recv_tensor()
-        logger.info(f"recv from producer ins hidden shape {hidden.shape}")
-        logger.info(f"recv done")
 
         return [input_tokens, roi, key, value, hidden]
 

@@ -72,6 +72,7 @@ if TYPE_CHECKING:
     VLLM_DISABLED_KERNELS: List[str] = []
     VLLM_USE_V1: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = False
+    VLLM_KV_TRANSFER_DRIVER: str = "simple_buffer"
 
 
 def get_default_cache_root():
@@ -392,6 +393,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Value can be "producer", "consumer" or "both".
     "VLLM_DISTRIBUTED_KV_ROLE":
     lambda: os.getenv("VLLM_DISTRIBUTED_KV_ROLE", None),
+
+    # Set the kv_transfer way (gpu--gpu, gpu-cpu-disk-gpu, etc.)
+    # default is simple_buffer (gpu to gpu)
+    "VLLM_KV_TRANSFER_DRIVER":
+    lambda: os.getenv("VLLM_KV_TRANSFER_DRIVER", "simple_buffer"),
 
     # If set, vllm will skip the deprecation warnings.
     "VLLM_NO_DEPRECATION_WARNING":
