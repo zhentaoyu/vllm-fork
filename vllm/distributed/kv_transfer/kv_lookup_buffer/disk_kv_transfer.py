@@ -17,18 +17,16 @@ class DiskKVTransfer(KVLookupBufferBase):
         2. decode instance: disk --> cpu --> hpu
     """
 
-    def __init__(self, root_dir: str, local_rank: int) -> None:
+    def __init__(self, local_rank: int, root_dir: str = "") -> None:
 
         self.root_dir = root_dir if root_dir is not None else ""
-        self.work_dir = "/data/disagg_prefill_kv"  #os.path.join(self.root_dir, "disagg_prefill_kv/")
+        self.work_dir = os.path.join(self.root_dir, "disagg_prefill_kv")
 
         self.init_work_dir = False
         self.local_rank = local_rank
+        self.rank = torch.distributed.get_rank()
         self.send_device = "cpu"
-        # torch.device(f"hpu:{self.local_rank}")
         self.recv_device = None
-        print(f"local_rank: {local_rank}")
-        print(self.work_dir)
 
     def _work_dir_init(self, load_or_save: str) -> None:
         if not self.init_work_dir:
@@ -43,8 +41,10 @@ class DiskKVTransfer(KVLookupBufferBase):
 
     def _encode_tensors(self, tensor1: torch.Tensor, tensor2: torch.Tensor) -> str:
 
-        tensor1_bytes = tensor1.cpu().numpy().tobytes()
-        tensor2_bytes = tensor2.cpu().numpy().tobytes()
+        tensor1_clone = tensor1.clone()
+        tensor2_clone = tensor2.clone()
+        tensor1_bytes = tensor1_clone.cpu().numpy().tobytes()
+        tensor2_bytes = tensor2_clone.cpu().numpy().tobytes()
 
         combined_bytes = tensor1_bytes + tensor2_bytes
         hash_object = hashlib.sha256(combined_bytes)
@@ -52,15 +52,20 @@ class DiskKVTransfer(KVLookupBufferBase):
 
         return hash_value
 
-    def _save_tensor(self, name: str, tensor: torch.Tensor,
+    def _save_tensor(self, tensor: torch.Tensor, name: str,
                      device: Union[str, torch.device]) -> None:
 
+        assert isinstance(tensor, torch.Tensor)
         tensor_device = tensor.to(device)
         torch.save(tensor_device, name)
+        logger.debug(f"local_rank: {self.local_rank}, rank: {self.rank} "\
+                     f"save tensor with shape {tensor.shape} into {name}")
 
     def _load_tensor(self, name: str, device: Union[str, torch.device]) -> torch.Tensor:
 
-        tensor_cpu = torch.load(name)
+        tensor_cpu = torch.load(name, weights_only=True)
+        logger.debug(f"local_rank: {self.local_rank}, rank: {self.rank} "\
+                     f"load tensor with shape {tensor_cpu.shape} from {name}")
         return tensor_cpu.to(device)
 
     def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
@@ -68,12 +73,11 @@ class DiskKVTransfer(KVLookupBufferBase):
                hidden: torch.Tensor) -> None:
 
         self._work_dir_init("save")
-        print(f"self.local_Rank: {self.local_rank}.")
 
-        tensor_key = self._encode_tensors(input_tokens, roi) + "/" + str(self.local_rank)
-        key_path = tensor_key + "/key.pt"
-        val_path = tensor_key + "/value.pt"
-        hid_path = tensor_key + "/hidden.pt"
+        tensor_key = self._encode_tensors(input_tokens, roi) + "_" + str(self.local_rank)
+        key_path = os.path.join(self.work_dir, tensor_key + "_key.pt")
+        val_path = os.path.join(self.work_dir, tensor_key + "_value.pt")
+        hid_path = os.path.join(self.work_dir, tensor_key + "_hidden.pt")
 
         self._save_tensor(key, key_path, self.send_device)
         self._save_tensor(value, val_path, self.send_device)
@@ -83,12 +87,11 @@ class DiskKVTransfer(KVLookupBufferBase):
                     roi: torch.Tensor) -> List[Optional[torch.Tensor]]:
 
         self._work_dir_init("load")
-        print(f"self.local_Rank: {self.local_rank}.")
 
-        tensor_key = self._encode_tensors(input_tokens, roi) + "/" + str(self.local_rank)
-        key_path = tensor_key + "/key.pt"
-        val_path = tensor_key + "/value.pt"
-        hid_path = tensor_key + "/hidden.pt"
+        tensor_key = self._encode_tensors(input_tokens, roi) + "_" + str(self.local_rank)
+        key_path = os.path.join(self.work_dir, tensor_key + "_key.pt")
+        val_path = os.path.join(self.work_dir, tensor_key + "_value.pt")
+        hid_path = os.path.join(self.work_dir, tensor_key + "_hidden.pt")
 
         self.recv_device = input_tokens.device
         key = self._load_tensor(key_path, self.recv_device)
