@@ -2090,7 +2090,8 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         # we can skip prefilling on tokens that successfully received KV caches
         # NOTE: The receive operation is blocking
         bypass_model_exec = False
-        if self.need_recv_kv(model_input, kv_caches):
+        s0 = time.time()
+        if not warmup_mode and self.need_recv_kv(model_input, kv_caches):
             logger.info(f"start to recev kv.........")
             hidden_states, bypass_model_exec, model_input = \
                 get_disagg_group().recv_kv_caches_and_hidden_states(
@@ -2101,6 +2102,10 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     model_input,
                     kv_caches=kv_caches
                 )
+            torch.hpu.synchronize()
+            # logger.info(f"model_input {model_input}")
+            logger.info(f"recv kv consume time {time.time() - s0}")
+            
 
             execute_model_kwargs = {
                 "input_ids": input_tokens,
@@ -2335,12 +2340,13 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     **execute_model_kwargs,
                     selected_token_indices=sampling_metadata.selected_token_indices
                 )
-                logger.info(f"hidden [0][:3] {hidden_states[0][:3]}")
+                # logger.info(f"hidden [0][:3] {hidden_states[0][:3]}")
                 logger.info(f"=====model forward done======")
 
         # Sending KV cache in distributed KV cache transfer setting
         # NOTE: the send operation is non-blocking
-        if self.need_send_kv(model_input, kv_caches):
+        s0 = time.time()
+        if not warmup_mode and self.need_send_kv(model_input, kv_caches):
             logger.info(f"start to send kv.........")
             get_disagg_group().send_kv_caches_and_hidden_states(
                 # self.model is used to know which layer the current
@@ -2351,6 +2357,8 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 kv_caches,
                 hidden_states,
             )
+            torch.hpu.synchronize()
+            logger.info(f"send kv consume time {time.time() - s0}")
 
     def _make_decode_output(
         self,

@@ -234,6 +234,7 @@ class KV_transfer_agent:
                 hidden_send = hidden_or_intermediate_states[start_pos:end_pos]
             if self.send_buffer is not None:
                 logger.debug(f"KV_PRODUCER starts to send kv")
+                logger.info(f"{current_tokens.dtype}, {keys.dtype}, {hidden_send.dtype}")
                 # hccl can not send bool, so use int type instead
                 self.send_buffer.insert(
                     current_tokens, torch.ones_like(current_tokens, dtype=torch.int32),
@@ -310,6 +311,7 @@ class KV_transfer_agent:
             logger.info(f"start to drop select...")
             logger.info(f"start_pos {start_pos}, slen {slen}")
             logger.debug(f"KV_CONSUMER starts to receive kv")
+            logger.info(f"current_tokens {current_tokens}")
             # hccl can not send bool, so use int type instead
             ret = self.recv_buffer.drop_select(
                 current_tokens, torch.ones_like(current_tokens, dtype=torch.int32))
@@ -350,14 +352,21 @@ class KV_transfer_agent:
                 key_cache, value_cache = kv_cache[0], kv_cache[1]
                 if _device_name == "hpu":
                     from vllm_hpu_extension import cache_ops as ops
-                    block_indices = model_input.attn_metadata.block_indices[kv_block_bs_idx:
-                                                    kv_block_size + block_num].reshape(-1)
+                    cur_seq_selected_idx = torch.arange(kv_block_bs_idx, kv_block_bs_idx + block_num,
+                                device=input_tokens_tensor.device)
+                    # logger.info(f"cur_seq_selected_idx {cur_seq_selected_idx}")
+                    block_indices = model_input.attn_metadata.block_indices.index_select(-1,
+                                cur_seq_selected_idx)
                     block_offsets = model_input.attn_metadata.block_offsets
                     if block_offsets is not None:
-                        block_offsets = block_offsets[kv_block_bs_idx:
-                                                      kv_block_bs_idx + block_num].reshape(-1)
+                        block_offsets = block_offsets.index_select(-1, cur_seq_selected_idx)
+                    # logger.info(f"origin block indices {model_input.attn_metadata.block_indices}"\
+                    #             f"origin block offsets {model_input.attn_metadata.block_offsets}"\
+                    #             f"input_tensor shape {input_tokens_tensor.shape}")
                     key = keys[i - start_layer].to(key_cache.device)
                     value = values[i - start_layer].to(value_cache.device)
+                    # logger.info(f"key shape {key.shape}, key_cache shape {key_cache.shape}, kv_block_bs_idx {kv_block_bs_idx}"\
+                    #             f" block_num {block_num}, block_indices {block_indices} block_offsets {block_offsets}")
                     key = key.unflatten(0, (block_indices.size(0), -1))
                     value = value.unflatten(0, (block_indices.size(0), -1))
                     key_cache = ops.insert_or_update_cache(key,
