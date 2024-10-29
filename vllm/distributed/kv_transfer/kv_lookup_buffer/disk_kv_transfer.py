@@ -7,6 +7,7 @@ import hashlib
 from vllm.distributed.kv_transfer.kv_lookup_buffer.base import (
     KVLookupBufferBase)
 from vllm.logger import init_logger
+import time
 
 logger = init_logger(__name__)
 
@@ -39,16 +40,23 @@ class DiskKVTransfer(KVLookupBufferBase):
                     raise RuntimeError(f"Can not find DiskKVTransfer work_dir_path {self.work_dir}.")
             self.init_work_dir = True
 
-    def _encode_tensors(self, tensor1: torch.Tensor, tensor2: torch.Tensor) -> str:
+    def _encode_tensors(self, input_tokens: torch.Tensor, roi: torch.Tensor) -> str:
 
-        tensor1_clone = tensor1.clone()
-        tensor2_clone = tensor2.clone()
-        tensor1_bytes = tensor1_clone.cpu().numpy().tobytes()
-        tensor2_bytes = tensor2_clone.cpu().numpy().tobytes()
+        # tensor1_clone = tensor1.clone()
+        # tensor2_clone = tensor2.clone()
+        # tensor1_bytes = tensor1.cpu().numpy().tobytes()
+        # tensor2_bytes = tensor2.cpu().numpy().tobytes()
+        t0 = time.time()
+        # assuming it's a bool mask
+        roi_tokens = input_tokens[roi.to(bool)]
+        combined_bytes = roi_tokens.cpu().numpy().tobytes()
+        torch.hpu.synchronize()
+        logger.debug(f"2 tensors to bytes time is {time.time() - t0}")
 
-        combined_bytes = tensor1_bytes + tensor2_bytes
+        t0 = time.time()
         hash_object = hashlib.sha256(combined_bytes)
         hash_value = hash_object.hexdigest()
+        logger.debug(f"gen hash key time is {time.time() - t0}")
 
         return hash_value
 
@@ -56,17 +64,32 @@ class DiskKVTransfer(KVLookupBufferBase):
                      device: Union[str, torch.device]) -> None:
 
         assert isinstance(tensor, torch.Tensor)
+        t0 = time.time()
         tensor_device = tensor.to(device)
+        logger.debug(f"kv producer tensor to cpu time is {time.time() - t0}")
+        t0 = time.time()
         torch.save(tensor_device, name)
+        logger.debug(f"kv producer tensor save time is {time.time() - t0}")
         logger.debug(f"local_rank: {self.local_rank}, rank: {self.rank} "\
                      f"save tensor with shape {tensor.shape} into {name}")
 
     def _load_tensor(self, name: str, device: Union[str, torch.device]) -> torch.Tensor:
 
-        tensor_cpu = torch.load(name, weights_only=True)
-        logger.debug(f"local_rank: {self.local_rank}, rank: {self.rank} "\
-                     f"load tensor with shape {tensor_cpu.shape} from {name}")
-        return tensor_cpu.to(device)
+        try:
+            t0 = time.time()
+            tensor_cpu = torch.load(name, weights_only=True)
+            logger.debug(f"kv consumer tensor load time is {time.time() - t0}")
+            logger.debug(f"local_rank: {self.local_rank}, rank: {self.rank} "\
+                        f"load tensor with shape {tensor_cpu.shape} from {name}")
+            t0 = time.time()
+            tensortt = tensor_cpu.to(device)
+            logger.debug(f"kv consumer tensor to hpu time is {time.time() - t0}")
+            return tensortt
+            # return tensor_cpu.to(device)
+        except Exception as e:
+            logger.error("Encountering exception in KV loading")
+            logger.error("%s", e)
+            return None
 
     def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
                key: torch.Tensor, value: torch.Tensor,
@@ -74,7 +97,9 @@ class DiskKVTransfer(KVLookupBufferBase):
 
         self._work_dir_init("save")
 
+        t0 = time.time()
         tensor_key = self._encode_tensors(input_tokens, roi) + "_" + str(self.local_rank)
+        logger.debug(f"kv producer tensor hash time is {time.time() - t0}")
         key_path = os.path.join(self.work_dir, tensor_key + "_key.pt")
         val_path = os.path.join(self.work_dir, tensor_key + "_value.pt")
         hid_path = os.path.join(self.work_dir, tensor_key + "_hidden.pt")
@@ -88,7 +113,9 @@ class DiskKVTransfer(KVLookupBufferBase):
 
         self._work_dir_init("load")
 
+        t0 = time.time()
         tensor_key = self._encode_tensors(input_tokens, roi) + "_" + str(self.local_rank)
+        logger.debug(f"kv consumer tensor hash time is {time.time() - t0}")
         key_path = os.path.join(self.work_dir, tensor_key + "_key.pt")
         val_path = os.path.join(self.work_dir, tensor_key + "_value.pt")
         hid_path = os.path.join(self.work_dir, tensor_key + "_hidden.pt")
