@@ -182,6 +182,7 @@ class KV_transfer_agent:
         input_tokens_tensor = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens_tensor.to("cpu").tolist() if \
             _device_name=="hpu" else model_input.attn_metadata.seq_lens
+        infer_lens = [input_tokens_tensor.size(-1)] * input_tokens_tensor.size(0)
         slot_mapping = model_input.attn_metadata.slot_mapping
         slot_mapping_flat = slot_mapping.flatten()
         try:
@@ -197,12 +198,13 @@ class KV_transfer_agent:
         # FIXME(Kuntai): This assume that all requests are prefill.
         for idx, slen in enumerate(seq_lens):
             start_pos = 0 if _device_name == "hpu" else sum(seq_lens[:idx])
-            end_pos = start_pos + slen
+            end_pos = start_pos + infer_lens[idx] if _device_name == "hpu" else start_pos + slen
             # select tokens
             # TODO assuming hpu use [bs, seqlen + padding] in prefill stage
             if _device_name == "hpu":
-                select_index = torch.arange(start_pos, end_pos, device=input_tokens_tensor.device)
-                current_tokens = input_tokens_tensor[idx].index_select(-1, select_index)
+                # select_index = torch.arange(start_pos, end_pos, device=input_tokens_tensor.device)
+                # current_tokens = input_tokens_tensor[idx].index_select(-1, select_index)
+                current_tokens = input_tokens_tensor[idx]
             else:
                 current_tokens = input_tokens_tensor[start_pos:end_pos]
 
@@ -217,8 +219,7 @@ class KV_transfer_agent:
                 value_cache = kv_cache[1].reshape(-1, num_heads, head_size)
 
                 if _device_name == "hpu":
-                    padding_seq_len = input_tokens_tensor.shape[-1]
-                    current_slot_mapping = slot_mapping[idx][start_pos:padding_seq_len]
+                    current_slot_mapping = slot_mapping[idx][start_pos:end_pos]
                 else:
                     current_slot_mapping = slot_mapping_flat[start_pos:end_pos]
 
@@ -264,6 +265,7 @@ class KV_transfer_agent:
         input_tokens_tensor = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens_tensor.to("cpu").tolist() if \
             _device_name=="hpu" else model_input.attn_metadata.seq_lens
+        infer_lens = [input_tokens_tensor.size(-1)] * input_tokens_tensor.size(0)
         slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
 
         hidden_or_intermediate_states_for_one_req = []
@@ -282,23 +284,31 @@ class KV_transfer_agent:
 
         # enumerate different requests
         # FIXME(Kuntai): This impl assumes that all requests are prefill.
-        logger.info(f"seq_lens tensor {seq_lens}")
+        logger.info(f"seq_lens tensor {infer_lens}")
+        # logger.info(f"model_input {model_input}")
         # TODO for hpu, other block_size
         kv_block_bs_idx = 0
         kv_block_size = 128
         block_num = torch.div(input_tokens_tensor.size(-1),
                               kv_block_size, rounding_mode="floor")
+        # deal with padded bs
+        real_bs = model_input.real_batch_size if _device_name=="hpu" else 1
+        pad_bs = model_input.batch_size_padded if _device_name=="hpu" else 1
+
         for idx, slen in enumerate(seq_lens):
 
             # TODO assuming hpu use [bs, seqlen + padding] in prefill stage
             start_pos = 0 if _device_name == "hpu" else sum(seq_lens[:idx])
-            end_pos = start_pos + slen
+            # add padding tokens
+            end_pos = start_pos + infer_lens[idx] if _device_name == "hpu" else start_pos + slen
             if _device_name == "hpu":
-                select_index = torch.arange(start_pos, end_pos, device=input_tokens_tensor.device)
-                current_tokens = input_tokens_tensor[idx].index_select(-1, select_index)
+                # select_index = torch.arange(start_pos, end_pos, device=input_tokens_tensor.device)
+                # current_tokens = input_tokens_tensor[idx].index_select(-1, select_index)
+                current_tokens = input_tokens_tensor[idx]
             else:
                 current_tokens = input_tokens_tensor[start_pos:end_pos]
-            num_tokens = slen
+            # num_tokens = slen
+            num_tokens = end_pos - start_pos
 
             # collecting data for rebuilding the input
             input_tokens_list.append(current_tokens)
@@ -312,28 +322,45 @@ class KV_transfer_agent:
             logger.info(f"start_pos {start_pos}, slen {slen}")
             logger.debug(f"KV_CONSUMER starts to receive kv")
             logger.info(f"current_tokens {current_tokens}")
-            # hccl can not send bool, so use int type instead
-            ret = self.recv_buffer.drop_select(
-                current_tokens, torch.ones_like(current_tokens, dtype=torch.int32))
-            if ret[0] is None:
-                # didn't find any match.
-                bypass_model_exec = False
-                num_computed_tokens_list.append(0)
-                continue
+            # no need to fetch padded request in habana
+            if _device_name == "hpu" and idx >= real_bs:
+                # redo forward if the requests  before padded request don't find matched KVs
+                if len(hidden_or_intermediate_states_for_one_req) == 0:
+                    bypass_model_exec = False
+                    keys, values, hidden = None, None, None
+                else:
+                    _, _, num_heads, head_size = kv_caches[0][0].shape
+                    layers = len(kv_caches)
+                    keys = torch.zeros((layers, infer_lens[idx], num_heads, head_size),
+                                       dtype = kv_caches[0][0].dtype,
+                                       device = kv_caches[0][0].device)
+                    values = torch.zeros((layers, infer_lens[idx], num_heads, head_size),
+                                         dtype = kv_caches[0][0].dtype,
+                                         device = kv_caches[0][0].device)
+                    hidden = torch.zeros_like(hidden_or_intermediate_states_for_one_req[0])
+            else:
+                # hccl can not send bool, so use int type instead
+                ret = self.recv_buffer.drop_select(
+                    current_tokens, torch.ones_like(current_tokens, dtype=torch.int32))
+                if ret[0] is None:
+                    # didn't find any match.
+                    bypass_model_exec = False
+                    num_computed_tokens_list.append(0)
+                    continue
 
-            roi: torch.Tensor = ret[1]
-            keys: torch.Tensor = ret[2]
-            values: torch.Tensor = ret[3]
-            hidden: torch.Tensor = ret[4]
+                roi: torch.Tensor = ret[1]
+                keys: torch.Tensor = ret[2]
+                values: torch.Tensor = ret[3]
+                hidden: torch.Tensor = ret[4]
 
-            num_computed_tokens = roi.shape[-1]
-            num_computed_tokens_list.append(num_computed_tokens)
+                num_computed_tokens = roi.shape[-1]
+                num_computed_tokens_list.append(num_computed_tokens)
 
-            # check if both KV cache and the hidden states are received
-            # If not, need to redo the forwarding to compute missing states
-            if not all([(num_computed_tokens == num_tokens), hidden is not None
-                        ]):
-                bypass_model_exec = False
+                # check if both KV cache and the hidden states are received
+                # If not, need to redo the forwarding to compute missing states
+                if not all([(num_computed_tokens == num_tokens), hidden is not None
+                            ]):
+                    bypass_model_exec = False
 
             # skip finding if one batch is missing in hpu
             # TODO batch reduction if find a completed single batch
@@ -343,6 +370,9 @@ class KV_transfer_agent:
             # update the end position based on how many tokens are cached.
             end_pos = start_pos + num_computed_tokens
 
+            logger.info(f"origin block indices {model_input.attn_metadata.block_indices}"\
+                                f"origin block offsets {model_input.attn_metadata.block_offsets}"\
+                                f"input_tensor shape {input_tokens_tensor.shape}")
             # put received KV caches into paged memory
             for i in range(start_layer, end_layer):
 
@@ -360,9 +390,6 @@ class KV_transfer_agent:
                     block_offsets = model_input.attn_metadata.block_offsets
                     if block_offsets is not None:
                         block_offsets = block_offsets.index_select(-1, cur_seq_selected_idx)
-                    # logger.info(f"origin block indices {model_input.attn_metadata.block_indices}"\
-                    #             f"origin block offsets {model_input.attn_metadata.block_offsets}"\
-                    #             f"input_tensor shape {input_tokens_tensor.shape}")
                     key = keys[i - start_layer].to(key_cache.device)
                     value = values[i - start_layer].to(value_cache.device)
                     # logger.info(f"key shape {key.shape}, key_cache shape {key_cache.shape}, kv_block_bs_idx {kv_block_bs_idx}"\
