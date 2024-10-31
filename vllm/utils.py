@@ -540,7 +540,10 @@ def get_open_port(force: bool = False) -> int:
     port = envs.VLLM_PORT
 
     if force:
-        import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
+        if current_platform.is_hpu():
+            import vllm.distributed.kv_transfer.vllm_hpu_adapter as dist_kv
+        else:
+            import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
         # This flag will only be True in disaggregated prefill scenario
         # and VLLM_PORT must be set so that vLLM can connect prefill vLLM
         # instance and decode vLLM instance.

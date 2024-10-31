@@ -371,7 +371,7 @@ def init_worker_distributed_environment(
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
 
-    import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
+    import vllm.distributed.kv_transfer.vllm_hpu_adapter as dist_kv
     if torch.distributed.is_initialized():
         torch_world_size = torch.distributed.get_world_size()
         if torch_world_size != parallel_config.world_size and \
