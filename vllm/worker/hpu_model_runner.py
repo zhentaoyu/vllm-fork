@@ -25,7 +25,7 @@ from vllm_hpu_extension.ops import batch2block, block2batch
 from vllm_hpu_extension.profiler import (HabanaHighLevelProfiler,
                                          HabanaMemoryProfiler, format_bytes)
 
-import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
+import vllm.distributed.kv_transfer.vllm_hpu_adapter as dist_kv
 from vllm.distributed import get_disagg_group
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import DeviceConfig, VllmConfig
@@ -2006,6 +2006,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 self.set_active_loras(model_input.lora_requests,
                                       model_input.lora_mapping)
             input_tokens = model_input.input_tokens
+            logger.info(f"====hpu model runner input size {input_tokens.shape}")
             input_positions = model_input.input_positions
             attn_metadata = model_input.attn_metadata
             sampling_metadata = model_input.sampling_metadata
@@ -2038,7 +2039,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         # NOTE: The receive operation is blocking
         bypass_model_exec = False
         s0 = time.time()
-        if not warmup_mode and self.need_recv_kv(model_input, kv_caches):
+        if num_steps == 1 and not warmup_mode and self.need_recv_kv(model_input, kv_caches):
             logger.info(f"start to recev kv.........")
             hidden_states, bypass_model_exec, model_input = \
                 get_disagg_group().recv_kv_caches_and_hidden_states(
@@ -2049,10 +2050,9 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     model_input,
                     kv_caches=kv_caches
                 )
-            torch.hpu.synchronize()
+            # torch.hpu.synchronize()
             # logger.info(f"model_input {model_input}")
             logger.info(f"recv kv consume time {time.time() - s0}")
-            
 
             execute_model_kwargs = {
                 "input_ids": input_tokens,
@@ -2118,20 +2118,24 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                             **execute_model_kwargs,
                             selected_token_indices=sampling_metadata.
                             selected_token_indices)
-                        logger.info(f"======model forward done======")
+                        logger.info(f"=====model forward done======")
 
                 # Sending KV cache in distributed KV cache transfer setting
                 # NOTE: the send operation is non-blocking
-                if self.need_send_kv(model_input, kv_caches):
+                s0 = time.time()
+                if num_steps == 1 and not warmup_mode and self.need_send_kv(model_input, kv_caches):
+                    logger.info(f"start to send kv.........")
                     get_disagg_group().send_kv_caches_and_hidden_states(
                         # self.model is used to know which layer the current
                         # worker is working on, so that we can send KV for only those
                         # layers.
-                        self.model,
+                        self.model.model,
                         model_input,
                         kv_caches,
-                        hidden_or_intermediate_states,
+                        hidden_states,
                     )
+                    # torch.hpu.synchronize()
+                    logger.info(f"send kv consume time {time.time() - s0}")
 
                 if self.lora_config:
                     LoraMask.setLoraMask(
@@ -2282,33 +2286,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         if use_async_out_proc:
             return [sampler_outputs[-1]]
         else:
-            model_event_name = 'model_executable'
-
-        if not bypass_model_exec:
-            with self.profiler.record_event('internal', model_event_name):
-                hidden_states = self.model.forward(
-                    **execute_model_kwargs,
-                    selected_token_indices=sampling_metadata.selected_token_indices
-                )
-                # logger.info(f"hidden [0][:3] {hidden_states[0][:3]}")
-                logger.info(f"=====model forward done======")
-
-        # Sending KV cache in distributed KV cache transfer setting
-        # NOTE: the send operation is non-blocking
-        s0 = time.time()
-        if not warmup_mode and self.need_send_kv(model_input, kv_caches):
-            logger.info(f"start to send kv.........")
-            get_disagg_group().send_kv_caches_and_hidden_states(
-                # self.model is used to know which layer the current
-                # worker is working on, so that we can send KV for only those
-                # layers.
-                self.model.model,
-                model_input,
-                kv_caches,
-                hidden_states,
-            )
-            torch.hpu.synchronize()
-            logger.info(f"send kv consume time {time.time() - s0}")
+            return sampler_outputs
 
     def _make_decode_output(
         self,
@@ -2354,7 +2332,6 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
             1. current vLLM instance is KV cache consumer/decode vLLM instance
             2. this batch is not a profiling run
             3. this batch is a prefill run
-
         Args:
             model_input: input to the model executable
             kv_caches: vLLM's paged memory
@@ -2378,7 +2355,6 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
             1. current vLLM instance is KV cache producer/prefill vLLM instance
             2. this batch is not a profiling run
             3. this batch is a prefill run
-
         Args:
             model_input: input to the model executable
             kv_caches: vLLM's paged memory
