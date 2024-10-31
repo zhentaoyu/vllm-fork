@@ -50,7 +50,7 @@ class DiskKVTransfer(KVLookupBufferBase):
         # assuming it's a bool mask
         roi_tokens = input_tokens[roi.to(bool)]
         combined_bytes = roi_tokens.cpu().numpy().tobytes()
-        torch.hpu.synchronize()
+        # torch.hpu.synchronize()
         logger.debug(f"2 tensors to bytes time is {time.time() - t0}")
 
         t0 = time.time()

@@ -38,11 +38,15 @@ from torch.distributed import Backend, ProcessGroup
 
 # Use this import to check if disagg prefill is enabled.
 # if enabled, need to adjust distributed group correspondingly.
-import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op, supports_custom_op
+
+if current_platform.is_hpu():
+    import vllm.distributed.kv_transfer.vllm_hpu_adapter as dist_kv
+else:
+    import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
 
 
 @dataclass
