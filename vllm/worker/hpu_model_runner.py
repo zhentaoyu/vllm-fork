@@ -2031,28 +2031,28 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     input_tokens, model_input.lora_ids,
                     attn_metadata.is_prompt)
 
-        # Receive KV cache in distributed KV cache transfer setting
-        # In disagg prefill setting, it will also recv hidden states and bypass
-        # model forwarding
-        # In KV cache database setting, it will change the model input so that
-        # we can skip prefilling on tokens that successfully received KV caches
-        # NOTE: The receive operation is blocking
-        bypass_model_exec = False
-        s0 = time.time()
-        if num_steps == 1 and not warmup_mode and self.need_recv_kv(model_input, kv_caches):
-            logger.info(f"start to recev kv.........")
-            hidden_states, bypass_model_exec, model_input = \
-                get_disagg_group().recv_kv_caches_and_hidden_states(
-                    # self.model is used to know which layer the current worker
-                    # is working on, so that we can receive KV for only those
-                    # layers.
-                    self.model.model,
-                    model_input,
-                    kv_caches=kv_caches
-                )
-            # torch.hpu.synchronize()
-            # logger.info(f"model_input {model_input}")
-            logger.info(f"recv kv consume time {time.time() - s0}")
+            # Receive KV cache in distributed KV cache transfer setting
+            # In disagg prefill setting, it will also recv hidden states and bypass
+            # model forwarding
+            # In KV cache database setting, it will change the model input so that
+            # we can skip prefilling on tokens that successfully received KV caches
+            # NOTE: The receive operation is blocking
+            bypass_model_exec = False
+            s0 = time.time()
+            if num_steps == 1 and not warmup_mode and self.need_recv_kv(model_input, kv_caches):
+                logger.info(f"start to recev kv.........")
+                hidden_states, bypass_model_exec, model_input = \
+                    get_disagg_group().recv_kv_caches_and_hidden_states(
+                        # self.model is used to know which layer the current worker
+                        # is working on, so that we can receive KV for only those
+                        # layers.
+                        self.model.model,
+                        model_input,
+                        kv_caches=kv_caches
+                    )
+                # torch.hpu.synchronize()
+                # logger.info(f"model_input {model_input}")
+                logger.info(f"recv kv consume time {time.time() - s0}")
 
             execute_model_kwargs = {
                 "input_ids": input_tokens,
