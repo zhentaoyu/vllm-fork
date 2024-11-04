@@ -65,6 +65,9 @@ class SimpleKVLookupBuffer(KVLookupBufferBase):
 
         # simple common prefix matching
         min_length = min(len(tokens_sender), len(tokens_recver))
+        # comp_idx = torch.arange(0, min_length, device=tokens_sender.device)
+        # if torch.allclose(tokens_sender.index_select(-1, comp_idx),
+        #                   tokens_recver.index_select(-1, comp_idx)):
         if torch.allclose(tokens_sender[:min_length],
                           tokens_recver[:min_length]):
             return min_length
