@@ -37,25 +37,27 @@ wait_for_server() {
 
 # no chunked prefill since habana vllm doesn't support it yet.
 launch_baseline_prefill() {
-  model="meta-llama/Meta-Llama-3.1-70B-Instruct"
+  model="shenzhi-wang/Llama3.1-8B-Chinese-Chat"  #"meta-llama/Meta-Llama-3.1-70B-Instruct"
   # disagg prefill
-  HABANA_VISIBLE_MODULES="0,1,2,3" python3 \
+  HABANA_VISIBLE_MODULES="0" python3 \
       -m vllm.entrypoints.openai.api_server \
       --model $model \
       --port 8100 \
-      -tp 4 \
+      -tp 1 \
       --max-model-len 10000 \
       --disable-log-stats \
       --disable-log-requests \
+      --num-scheduler-steps 1 \
       --gpu-memory-utilization 0.8 &
-  HABANA_VISIBLE_MODULES="4,5,6,7" python3 \
+  HABANA_VISIBLE_MODULES="1" python3 \
     -m vllm.entrypoints.openai.api_server \
     --model $model \
     --port 8200 \
-    -tp 4 \
+    -tp 1 \
     --max-model-len 10000 \
     --disable-log-stats \
     --disable-log-requests \
+    --num-scheduler-steps 1 \
     --gpu-memory-utilization 0.8 &
   wait_for_server 8100
   wait_for_server 8200
@@ -65,22 +67,24 @@ launch_baseline_prefill() {
 
 
 launch_disagg_prefill() {
-  model="meta-llama/Meta-Llama-3.1-70B-Instruct" 
+  model="shenzhi-wang/Llama3.1-8B-Chinese-Chat"   #"meta-llama/Meta-Llama-3.1-70B-Instruct" 
   # disagg prefill
-  VLLM_PORT=12345 VLLM_DISTRIBUTED_KV_ROLE=producer HABANA_VISIBLE_MODULES="0,1,2,3" python3 \
+  # 17k-0.5
+  # --max-seq-len-to-capture
+  VLLM_PORT=12345 VLLM_DISTRIBUTED_KV_ROLE=producer python3 \
       -m vllm.entrypoints.openai.api_server \
       --model $model \
       --port 8100 \
-      -tp 4 \
+      -tp 1 \
       --max-model-len 10000 \
       --disable-log-stats \
       --disable-log-requests \
       --gpu-memory-utilization 0.8 &
-  VLLM_PORT=12345 VLLM_DISTRIBUTED_KV_ROLE=consumer HABANA_VISIBLE_MODULES="4,5,6,7" python3 \
+  VLLM_PORT=12345 VLLM_DISTRIBUTED_KV_ROLE=consumer python3 \
     -m vllm.entrypoints.openai.api_server \
     --model $model \
     --port 8200 \
-    -tp 4 \
+    -tp 1 \
     --max-model-len 10000 \
     --disable-log-stats \
     --disable-log-requests \
@@ -94,10 +98,10 @@ launch_disagg_prefill() {
 
 benchmark() {
   results_folder="./results"
-  model="meta-llama/Meta-Llama-3.1-70B-Instruct"
+  model="shenzhi-wang/Llama3.1-8B-Chinese-Chat"   #"meta-llama/Meta-Llama-3.1-70B-Instruct"
   dataset_name="sonnet"
   dataset_path="../sonnet_4x.txt"
-  num_prompts=200
+  num_prompts=4
   qps=$1
   prefix_len=50
   input_len=1024
@@ -150,37 +154,39 @@ main() {
 
   export VLLM_LOGGING_LEVEL=DEBUG
   export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
+  # "simple_buffer"
+  export VLLM_KV_TRANSFER_DRIVER="disk_kv_transfer"
 
   # required to be true for tensor parallel inference with HPU Graphs
   export PT_HPU_ENABLE_LAZY_COLLECTIVES=true
   # for hpu graphs warmup
-  export VLLM_PROMPT_BS_BUCKET_MIN=1      # (default:1)
-  export VLLM_PROMPT_BS_BUCKET_STEP=4     # (default:32)
-  export VLLM_PROMPT_BS_BUCKET_MAX=32     # (default:64)
+  # export VLLM_PROMPT_BS_BUCKET_MIN=1      # (default:1)
+  # export VLLM_PROMPT_BS_BUCKET_STEP=4     # (default:32)
+  # export VLLM_PROMPT_BS_BUCKET_MAX=32     # (default:64)
 
-  # input_len - 2*prefix_len ~ input_len + 2*prefix_len
-  # divisible by block_size 128
-  export VLLM_PROMPT_SEQ_BUCKET_MIN=896   # (default:128)
-  export VLLM_PROMPT_SEQ_BUCKET_STEP=128  # (default:128)
-  export VLLM_PROMPT_SEQ_BUCKET_MAX=1152  # (default:1024)
+  # # input_len - 2*prefix_len ~ input_len + 2*prefix_len
+  # # divisible by block_size 128
+  # export VLLM_PROMPT_SEQ_BUCKET_MIN=896   # (default:128)
+  # export VLLM_PROMPT_SEQ_BUCKET_STEP=128  # (default:128)
+  # export VLLM_PROMPT_SEQ_BUCKET_MAX=1152  # (default:1024)
 
-  export VLLM_DECODE_BS_BUCKET_MIN=1      # (default:1)
-  export VLLM_DECODE_BS_BUCKET_STEP=4     # (default:32)
-  export VLLM_DECODE_BS_BUCKET_MAX=64     # (default:256)
+  # export VLLM_DECODE_BS_BUCKET_MIN=1      # (default:1)
+  # export VLLM_DECODE_BS_BUCKET_STEP=8     # (default:32)
+  # export VLLM_DECODE_BS_BUCKET_MAX=64     # (default:256)
 
-  launch_baseline_prefill
-  for qps in 2 4 6 8; do
-  benchmark $qps $default_output_len baseline_prefill
-  done
-  kill_hpu_processes
+  # launch_baseline_prefill
+  # for qps in 1; do
+  # benchmark $qps $default_output_len baseline_prefill
+  # done
+  # kill_hpu_processes
 
   launch_disagg_prefill
-  for qps in 2 4 6 8; do
+  for qps in 2; do
   benchmark $qps $default_output_len disagg_prefill
   done
   kill_hpu_processes
 
-  python3 visualize_benchmark_results.py --device "hpu"
+  # python3 visualize_benchmark_results.py --device "hpu"
 
 }
 
