@@ -14,7 +14,7 @@ logger = init_logger(__name__)
 class DiskKVTransfer(KVLookupBufferBase):
     """
         disk kv transfer database: (tensor_key, tensor.pt) --> (file_name, file)
-        1. prefill instance: hpu --> cpu --> disk
+        1. prefill instance: hpu <--> cpu <--> disk
         2. decode instance: disk --> cpu --> hpu
     """
 
@@ -37,7 +37,7 @@ class DiskKVTransfer(KVLookupBufferBase):
                     logger.debug(f"DiskKVTransfer work_dir_path {self.work_dir} has been created.")
                 else:
                     assert load_or_save == "load"
-                    raise RuntimeError(f"Can not find DiskKVTransfer work_dir_path {self.work_dir}.")
+                    logger.warning(f"Can not find DiskKVTransfer work_dir_path {self.work_dir}.")
             self.init_work_dir = True
 
     def _encode_tensors(self, input_tokens: torch.Tensor, roi: torch.Tensor) -> str:
@@ -66,24 +66,27 @@ class DiskKVTransfer(KVLookupBufferBase):
         assert isinstance(tensor, torch.Tensor)
         t0 = time.time()
         tensor_device = tensor.to(device)
-        logger.debug(f"kv producer tensor to cpu time is {time.time() - t0}")
+        logger.debug(f"tensor to cpu time is {time.time() - t0}")
         t0 = time.time()
         torch.save(tensor_device, name)
-        logger.debug(f"kv producer tensor save time is {time.time() - t0}")
+        logger.debug(f"tensor save time is {time.time() - t0}")
         logger.debug(f"local_rank: {self.local_rank}, rank: {self.rank} "\
                      f"save tensor with shape {tensor.shape} into {name}")
 
     def _load_tensor(self, name: str, device: Union[str, torch.device]) -> torch.Tensor:
 
         try:
+            if not os.path.exists(name):
+                logger.warning(f"cache path {name} does not exist.")
+                return None
             t0 = time.time()
             tensor_cpu = torch.load(name, weights_only=True)
-            logger.debug(f"kv consumer tensor load time is {time.time() - t0}")
+            logger.debug(f"tensor load time is {time.time() - t0}")
             logger.debug(f"local_rank: {self.local_rank}, rank: {self.rank} "\
                         f"load tensor with shape {tensor_cpu.shape} from {name}")
             t0 = time.time()
             tensortt = tensor_cpu.to(device)
-            logger.debug(f"kv consumer tensor to hpu time is {time.time() - t0}")
+            logger.debug(f"tensor to hpu time is {time.time() - t0}")
             return tensortt
             # return tensor_cpu.to(device)
         except Exception as e:
@@ -99,7 +102,7 @@ class DiskKVTransfer(KVLookupBufferBase):
 
         t0 = time.time()
         tensor_key = self._encode_tensors(input_tokens, roi) + "_" + str(self.local_rank)
-        logger.debug(f"kv producer tensor hash time is {time.time() - t0}")
+        logger.debug(f"tensor hash time is {time.time() - t0}")
         key_path = os.path.join(self.work_dir, tensor_key + "_key.pt")
         val_path = os.path.join(self.work_dir, tensor_key + "_value.pt")
         hid_path = os.path.join(self.work_dir, tensor_key + "_hidden.pt")
@@ -115,7 +118,7 @@ class DiskKVTransfer(KVLookupBufferBase):
 
         t0 = time.time()
         tensor_key = self._encode_tensors(input_tokens, roi) + "_" + str(self.local_rank)
-        logger.debug(f"kv consumer tensor hash time is {time.time() - t0}")
+        logger.debug(f"tensor hash time is {time.time() - t0}")
         key_path = os.path.join(self.work_dir, tensor_key + "_key.pt")
         val_path = os.path.join(self.work_dir, tensor_key + "_value.pt")
         hid_path = os.path.join(self.work_dir, tensor_key + "_hidden.pt")
@@ -124,7 +127,7 @@ class DiskKVTransfer(KVLookupBufferBase):
         key = self._load_tensor(key_path, self.recv_device)
         val = self._load_tensor(val_path, self.recv_device)
         hid = self._load_tensor(hid_path, self.recv_device)
-        assert key is not None
+
         res = [input_tokens, roi, key, val, hid]
 
         return res

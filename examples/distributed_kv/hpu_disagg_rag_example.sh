@@ -40,6 +40,9 @@ wait_for_server() {
 }
 
 export VLLM_KV_TRANSFER_DRIVER="disk_kv_transfer"
+# prompt_attention_with_context has no FUSEDSDPA implementation yet
+export VLLM_PROMPT_USE_FUSEDSDPA=false
+export PT_LAZY_MODE=0
 
 # prefilling instance, which is the KV producer
  VLLM_DISTRIBUTED_KV_ROLE=producer python3 \
@@ -47,6 +50,7 @@ export VLLM_KV_TRANSFER_DRIVER="disk_kv_transfer"
     --model shenzhi-wang/Llama3.1-8B-Chinese-Chat \
     --port 8100 \
     --max-model-len 10000 \
+    --enforce-eager True \
     --gpu-memory-utilization 0.8 &
 
 # decoding instance, which is the KV consumer
@@ -55,6 +59,7 @@ VLLM_DISTRIBUTED_KV_ROLE=consumer python3 \
     --model shenzhi-wang/Llama3.1-8B-Chinese-Chat \
     --port 8200 \
     --max-model-len 10000 \
+    --enforce-eager True \
     --gpu-memory-utilization 0.8 &
 
 # wait until prefill and decode instances are ready
