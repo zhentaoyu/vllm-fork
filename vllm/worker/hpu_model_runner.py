@@ -286,6 +286,8 @@ class HpuModelAdapter:
         attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(
             mask, -math.inf))
         attn_metadata = prefill_metadata._replace(attn_bias=attn_bias)
+        # import pdb; pdb.set_trace()
+        logger.info(f"attn_metadata updated {attn_metadata}")
         return attn_metadata
 
     def _set_block_mapping(self, metadata, batch_size, device, dtype):
@@ -800,6 +802,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             seq_len = min(seq_data.get_len(), context_len + token_chunk_size)
             prompt_tokens = seq_data.get_token_ids()[context_len:seq_len]
             seq_lens.append(seq_len)
+            logger.info(f"computed_block_nums {computed_block_nums}, context_len {context_len}")
 
             # NOTE: This only works for oooooooxxx style attention.
             if computed_block_nums is not None and len(
@@ -844,6 +847,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             # Compute the slot mapping.
             slot_mapping.append([])
             block_table = seq_group_metadata.block_tables[seq_id]
+            # import pdb; pdb.set_trace()
 
             # Mask the [0, start_idx) tokens of the prompt with _PAD_SLOT_ID,
             # where start_idx is max(0, seq_len - sliding_window).
@@ -866,6 +870,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 slot = block_number * self.block_size + block_offset
                 slot_mapping[-1].append(slot)
 
+        # import pdb; pdb.set_trace()
         max_query_len = max(query_lens)
         sum_query_len = sum(query_lens)
         real_num_seqs = len(query_lens)
@@ -894,6 +899,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             assert not self.scheduler_config.chunked_prefill_enabled
             # prefix caching
 
+            logger.info(f"context_lens {context_lens}")
+            logger.info(f"prefix_block_tables {prefix_block_tables}")
             max_num_block = max(len(bt) for bt in prefix_block_tables)
             prefix_block_list = list(
                 itertools.chain.from_iterable(
@@ -901,16 +908,47 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     ([_PAD_BLOCK_ID] * (max_num_block - len(bt)))
                     for bt in prefix_block_tables))
 
+            logger.info(f"prefix_block_list {prefix_block_list}")
             # TODO: pad to proper len
             pad_len = len(prefix_block_list)
             prefix_block_list = pad_list(prefix_block_list, pad_len,
                                          _PAD_BLOCK_ID)
 
+            logger.info(f"prefix_block_list after padding {prefix_block_list}")
             prefix_block_list_tensor = torch.tensor(prefix_block_list,
                                                     dtype=torch.long,
                                                     device='cpu')
         else:
             prefix_block_list_tensor = None
+
+        # token_ids of "### Question:" of llama3.1-8b
+        # hacky code for benchmark
+        # TODO remove it for unified API
+        rag_suffix_tokens = [14711, 16225, 25]
+        rs_len = 3
+        self.rag_start_pos = []
+        self.rag_end_pos = []
+        for idx in range(len(input_tokens)):
+            seq_len = len(input_tokens[idx])
+            if seq_len < rs_len:
+                # no rag token ids
+                self.rag_start_pos.append(-1)
+                self.rag_end_pos.append(-1)
+                continue
+            else:
+                for i in reversed(range(seq_len)):
+                    if i - rs_len >= 0:
+                       if [input_tokens[idx][i - 2],
+                           input_tokens[idx][i - 1],
+                           input_tokens[idx][i]] == rag_suffix_tokens:
+                           self.rag_start_pos.append(0)
+                           self.rag_end_pos.append(i)
+                           break
+                    else:
+                        self.rag_start_pos.append(-1)
+                        self.rag_end_pos.append(-1)
+        # logger.info(f"input_tokens {input_tokens}")
+        logger.info(f"rag_start_pos: {self.rag_start_pos}, rag_end_pos: {self.rag_end_pos}")
 
         input_tokens = make_tensor_with_pad(input_tokens,
                                             max_len=max_prompt_len,
@@ -1005,6 +1043,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         dummy_slots = itertools.cycle(
             range(_PAD_SLOT_ID, _PAD_SLOT_ID + self.block_size))
 
+        logger.info(f"input tokens of input: {input_tokens}, seq_lens {seq_lens}")
         for seq_group_metadata in seq_group_metadata_list:
             assert not seq_group_metadata.is_prompt
             assert seq_group_metadata.token_chunk_size == 1
@@ -1021,6 +1060,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 if output is None:
                     generation_token = seq_data.get_last_token_id()
                     input_tokens.append([generation_token])
+                    logger.info(f"seq_id {seq_id}, gen_token {generation_token}, input_tokens {input_tokens}")
 
                 seq_len = seq_data.get_len()
                 position = seq_len - 1
@@ -1223,6 +1263,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                                      seq_lens, query_lens,
                                                      self.device,
                                                      self.pin_memory)
+        logger.info(f"sampling_metadata before {sampling_metadata}")
 
         if not self.scheduler_config.chunked_prefill_enabled:
             assert (len(prefill_reqs) and len(decode_reqs)) == 0
@@ -1262,6 +1303,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             dtype=sampling_metadata.selected_token_indices.dtype,
             device=sampling_metadata.selected_token_indices.device)
         sampling_metadata.selected_token_indices.add_(paddings)
+        logger.info(f"sampling_metadata after {sampling_metadata}")
 
         if self.lora_config:
             lora_mapping = LoRAMapping(
@@ -2040,6 +2082,9 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
             bypass_model_exec = False
             s0 = time.time()
             if num_steps == 1 and not warmup_mode and self.need_recv_kv(model_input, kv_caches):
+                if hasattr(self, "rag_end_pos"):
+                    get_disagg_group().rag_start_pos = self.rag_start_pos
+                    get_disagg_group().rag_end_pos = self.rag_end_pos
                 logger.info(f"start to recev kv.........")
                 hidden_states, bypass_model_exec, model_input = \
                     get_disagg_group().recv_kv_caches_and_hidden_states(
@@ -2052,6 +2097,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     )
                 # torch.hpu.synchronize()
                 # logger.info(f"model_input {model_input}")
+                htorch.core.mark_step()
                 logger.info(f"recv kv consume time {time.time() - s0}")
 
             execute_model_kwargs = {
@@ -2113,11 +2159,14 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                             broadcast_data["attn_metadata"])
                     })
                 if not bypass_model_exec:
+                    # logger.info(f"input_tokens {input_tokens}")
+                    # logger.info(f"attn_metadata {self.trim_attn_metadata(attn_metadata)}")
                     with self.profiler.record_event('internal', model_event_name):
                         hidden_states = self.model.forward(
                             **execute_model_kwargs,
                             selected_token_indices=sampling_metadata.
                             selected_token_indices)
+                        # torch.hpu.synchronize()
                         logger.info(f"=====model forward done======")
 
                 # Sending KV cache in distributed KV cache transfer setting
@@ -2135,6 +2184,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         hidden_states,
                     )
                     # torch.hpu.synchronize()
+                    htorch.core.mark_step()
                     logger.info(f"send kv consume time {time.time() - s0}")
 
                 if self.lora_config:
@@ -2153,6 +2203,8 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         sampling_metadata.selected_token_indices = None
                     logits = self.model.compute_logits(hidden_states,
                                                        sampling_metadata)
+                    # torch.hpu.synchronize()
+                    # logger.info(f"logits {logits[0]}")
                 htorch.core.mark_step()
                 # Only perform sampling in the driver worker.
                 if not self.is_driver_worker:
@@ -2170,6 +2222,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         logits=logits,
                         sampling_metadata=sampling_metadata,
                     )
+                    logger.info(f"output1 {output}")
                     if num_steps > 1:
                         output = output.sampled_token_ids
                         self.cached_step_outputs.append(
@@ -2329,9 +2382,9 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
     def need_recv_kv(self, model_input, kv_caches) -> bool:
         """Check if we need to receive kv-cache from the other worker.
         We need to receive KV when
-            1. current vLLM instance is KV cache consumer/decode vLLM instance
+            1. current vLLM instance is KV cache producer (prefill, incremental kv) or
+               consumer (decode, generate tokens) vLLM instance
             2. this batch is not a profiling run
-            3. this batch is a prefill run
         Args:
             model_input: input to the model executable
             kv_caches: vLLM's paged memory
@@ -2344,14 +2397,20 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         # Currently, input sequences can only contain all prompts
         # or all decoding. True if all sequences are prompts.
         is_prefill_run = model_input.attn_metadata.is_prompt
-        logger.info(f"in need_recv_kv, dist_kv.IS_KV_CONSUMER {dist_kv.IS_KV_CONSUMER}, is_profile_run {is_profile_run}, is_prefill_run {is_prefill_run}")
+        producer_need_recv = dist_kv.IS_KV_PRODUCER and (not is_profile_run) and is_prefill_run
+        # TODO remove it for unified API
+        if hasattr(self, "rag_end_pos") and len(self.rag_end_pos) > 0 and producer_need_recv:
+            if self.rag_end_pos == [-1] * len(self.rag_end_pos):
+                producer_need_recv = False
+        # producer_need_recv = False
+        consumer_need_recv = dist_kv.IS_KV_CONSUMER and (not is_profile_run) and is_prefill_run
+        logger.debug(f"producer needs receive kv: {producer_need_recv}, consumer needs receive kv: {consumer_need_recv}")
 
-        return dist_kv.IS_KV_CONSUMER and (
-            not is_profile_run) and is_prefill_run
+        return (producer_need_recv or consumer_need_recv)
 
     def need_send_kv(self, model_input, kv_caches) -> bool:
         """Check if we need to send kv-cache to the other worker.
-        We need to send KV when
+        We need to send (incremental) KV when
             1. current vLLM instance is KV cache producer/prefill vLLM instance
             2. this batch is not a profiling run
             3. this batch is a prefill run
