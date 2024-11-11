@@ -25,12 +25,11 @@ import itertools
 
 import torch
 from torch.distributed import Backend
-import numpy as np
 
 from vllm_hpu_extension import cache_ops as ops
 
 if TYPE_CHECKING:
-        from vllm.worker.model_runner import ModelInputForHPUWithSamplingMetadata as ModelInputForHPUWithSamplingMetadata
+    from vllm.worker.model_runner import ModelInputForHPUWithSamplingMetadata as ModelInputForHPUWithSamplingMetadata
 
 import vllm.envs as envs
 from vllm.distributed.kv_transfer.kv_lookup_buffer.base import (
@@ -88,6 +87,8 @@ class KV_transfer_agent:
 
         # TODO other block size
         self.block_size = 128
+        # TODO remove
+        self.original_input_tokens_t = None
 
         if self.kv_transfer_driver == "simple_buffer":
             import vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer as sklb
@@ -181,8 +182,11 @@ class KV_transfer_agent:
     ) -> None:
 
         input_tokens_tensor = model_input.input_tokens
+        # TODO remove
+        if self.original_input_tokens_t is not None:
+            input_tokens_tensor = self.original_input_tokens_t
         seq_lens = model_input.seq_lens
-        # seq_lens = model_input.attn_metadata.seq_lens_tensor.to("cpu").tolist()
+        # query_lens = model_input.query_lens
         slot_mapping = model_input.attn_metadata.slot_mapping
         try:
             start_layer = model_executable.model.start_layer
@@ -198,6 +202,7 @@ class KV_transfer_agent:
         logger.info(f"seq_lens tensor in send {input_tokens_tensor.size(-1)} {seq_lens}")
         for idx, slen in enumerate(seq_lens):
             start_pos = 0
+            # # TODO prompt attention with context (query_lens)
             end_pos = start_pos + slen
             # select tokens
             # hpu use [bs, seqlen + padding] in prefill stage
@@ -228,9 +233,8 @@ class KV_transfer_agent:
             if self.send_buffer is not None:
                 logger.debug(f"kv role {envs.VLLM_DISTRIBUTED_KV_ROLE} starts to send kv")
                 # hccl can not send bool, so use int type instead
-                self.send_buffer.insert(
-                    current_tokens, torch.ones_like(current_tokens, dtype=torch.int32),
-                    keys, values, hidden_send)
+                roi = torch.ones_like(current_tokens, dtype=torch.int32)
+                self.send_buffer.insert(current_tokens, roi, keys, values, hidden_send)
 
         logger.debug("[rank%d]: KV send DONE.", torch.distributed.get_rank())
 
@@ -256,11 +260,7 @@ class KV_transfer_agent:
         bypass_model_exec = True
 
         input_tokens_tensor = model_input.input_tokens
-        logger.info(f"model_input {model_input}")
         seq_lens = model_input.seq_lens
-        # seq_lens = model_input.attn_metadata.seq_lens_tensor.to("cpu").tolist()
-        # padded batch seq_len
-        infer_len = input_tokens_tensor.size(-1)
         slot_mapping = model_input.attn_metadata.slot_mapping
         # TODO remove it for unified API
         rag_start_pos = [-1] * input_tokens_tensor.size(0)
@@ -286,10 +286,8 @@ class KV_transfer_agent:
 
         # enumerate different requests
         # FIXME(Kuntai): This impl assumes that all requests are prefill.
-        logger.info(f"seq_lens tensor {infer_len} {seq_lens}")
-        # # TODO for hpu, other block_size
-        # kv_block_bs_idx = 0
-        # block_num = torch.div(infer_len, self.block_size, rounding_mode="floor")
+        logger.info(f"seq_lens tensor {input_tokens_tensor.size(-1)} {seq_lens}")
+
         # deal with padded bs
         real_bs = model_input.real_batch_size
         block_indices = model_input.attn_metadata.block_indices
@@ -318,7 +316,6 @@ class KV_transfer_agent:
 
             logger.info(f"start_pos {start_pos}, slen {slen}")
             logger.debug(f"kv role {envs.VLLM_DISTRIBUTED_KV_ROLE} starts to receive kv")
-            # logger.info(f"current_tokens {current_tokens}")
             # 1. no need to care about padded requests kv cache
             # 2. make a padded hidden_states for sampling if all real requests have
             #    fetched whole kv caches successfully
@@ -328,21 +325,6 @@ class KV_transfer_agent:
                     hidden_or_intermediate_states_for_one_req.append(hidden)
                 # remain one token for batch hidden_states generation
                 num_computed_tokens_list.append(end_pos - 1)
-                # # redo forward if the requests  before padded request don't find matched KVs
-                # if len(hidden_or_intermediate_states_for_one_req) == 0:
-                #     bypass_model_exec = False
-                #     keys, values, hidden = None, None, None
-                # else:
-                #     _, _, num_heads, head_size = kv_caches[0][0].shape
-                #     layers = len(kv_caches)
-                #     keys = torch.zeros((layers, infer_len, num_heads, head_size),
-                #                        dtype = kv_caches[0][0].dtype,
-                #                        device = kv_caches[0][0].device)
-                #     values = torch.zeros((layers, infer_len, num_heads, head_size),
-                #                          dtype = kv_caches[0][0].dtype,
-                #                          device = kv_caches[0][0].device)
-                #     hidden = torch.zeros_like(hidden_or_intermediate_states_for_one_req[0])
-                # hidden_or_intermediate_states_for_one_req.append(hidden)
             else:
                 roi_len = slen if rag_end_pos[idx] == -1 else (rag_end_pos[idx] + 1)
                  # hccl can not send bool, so use int type instead
@@ -410,89 +392,26 @@ class KV_transfer_agent:
 
                     hidden_or_intermediate_states_for_one_req.append(hidden)
 
-                # # deal with padding tokens kv cache
-                # if hit_cache:
-                #     _, _, num_heads, head_size = kv_caches[0][0].shape
-                #     layers = len(kv_caches)
-                #     padded_keys = torch.zeros((layers, infer_len, num_heads, head_size),
-                #                             dtype = kv_caches[0][0].dtype,
-                #                             device = kv_caches[0][0].device)
-                #     padded_values = torch.zeros((layers, infer_len, num_heads, head_size),
-                #                                 dtype = kv_caches[0][0].dtype,
-                #                                 device = kv_caches[0][0].device)
-                #     fill_idx = torch.arange(0, slen, device=input_tokens_tensor.device)
-                #     logger.info(f"keys shape {keys.shape}")
-                #     logger.info(f"padded_keys shape {padded_keys.shape}")
-                #     padded_keys.index_copy_(1, fill_idx, keys)
-                #     padded_values.index_copy_(1, fill_idx, values)
-                #     keys = padded_keys
-                #     values = padded_values
-
-            # # skip finding if one batch is missing in hpu
-            # # TODO batch reduction if find a completed single batch
-            # if not bypass_model_exec:
-            #     break
-
-            # # update the end position based on how many tokens are cached.
-            # end_pos = start_pos + num_computed_tokens
-
-            # logger.info(f"origin block indices {model_input.attn_metadata.block_indices}"\
-            #                     f"origin block offsets {model_input.attn_metadata.block_offsets}"\
-            #                     f"input_tensor shape {input_tokens_tensor.shape}")
-            # # put received KV caches into paged memory
-            # for i in range(start_layer, end_layer):
-
-            #     kv_cache = kv_caches[i - start_layer]
-            #     key_cache, value_cache = kv_cache[0], kv_cache[1]
-
-            #     cur_seq_selected_idx = torch.arange(kv_block_bs_idx, kv_block_bs_idx + block_num,
-            #                 device=input_tokens_tensor.device)
-            #     # logger.info(f"cur_seq_selected_idx {cur_seq_selected_idx}")
-            #     block_indices = model_input.attn_metadata.block_indices.index_select(-1,
-            #                 cur_seq_selected_idx)
-            #     block_offsets = model_input.attn_metadata.block_offsets
-            #     if block_offsets is not None:
-            #         block_offsets = block_offsets.index_select(-1, cur_seq_selected_idx)
-            #     key = keys[i - start_layer].to(key_cache.device)
-            #     value = values[i - start_layer].to(value_cache.device)
-            #     key = key.unflatten(0, (block_indices.size(0), -1))
-            #     value = value.unflatten(0, (block_indices.size(0), -1))
-            #     logger.info(f"key shape {key.shape}, key_cache shape {key_cache.shape}, kv_block_bs_idx {kv_block_bs_idx}"\
-            #                 f" block_num {block_num}, block_indices {block_indices} block_offsets {block_offsets}")
-            #     key_cache = ops.insert_or_update_cache(key,
-            #                                            key_cache,
-            #                                            block_indices,
-            #                                            block_offsets)
-            #     value_cache = ops.insert_or_update_cache(value,
-            #                                              value_cache,
-            #                                              block_indices,
-            #                                              block_offsets)
-
-            # kv_block_bs_idx += block_num
-            # hidden_or_intermediate_states_for_one_req.append(hidden)
-
         if not bypass_model_exec:
             # Some of the KV cache is not retrieved
             # so we need to adjust model_input and redo the forwarding.
             logger.debug(
                 "[rank%d]: Failed to receive all KVs and hidden "
                 "states, redo model forwarding.", torch.distributed.get_rank())
-            skip_partial_prefill = False
-            # TODO HPU partial input may be complicated under (bs, padded_len) input shape
-            if skip_partial_prefill:
-                hidden_or_intermediate_states = None
-            else:
-                rebuilt_model_input = build_partial_prefill_input(
-                    model_input,
-                    input_tokens_list,
-                    num_computed_tokens_list,
-                    start_pos_list,
-                    slot_mapping,
-                    device=input_tokens_tensor.device,
-                    block_size=self.block_size,
-                )
-                model_input = rebuilt_model_input
-                hidden_or_intermediate_states = None
+            logger.info(f"model_input before: {model_input}")
+            self.original_input_tokens_t = model_input.input_tokens
+            rebuilt_model_input = build_partial_prefill_input(
+                model_input,
+                input_tokens_list,
+                num_computed_tokens_list,
+                start_pos_list,
+                slot_mapping,
+                device=input_tokens_tensor.device,
+                block_size=self.block_size,
+            )
+            model_input = rebuilt_model_input
+            hidden_or_intermediate_states = None
+            logger.info(f"model_input after: {model_input}")
 
         else:
             logger.debug(
@@ -528,6 +447,11 @@ def build_partial_prefill_input(
        its seq_len to 1 rather than performing batch reduction.
     """
 
+    # no request receive any kv caches
+    logger.info(f"num_computed_tokens_list {num_computed_tokens_list}")
+    if all(nt ==0 for nt in num_computed_tokens_list[:model_input.real_batch_size]):
+        return model_input
+
     from vllm.worker.hpu_model_runner import (_PAD_SLOT_ID,
                                               _PAD_BLOCK_ID,
                                               find_bucket,
@@ -539,10 +463,6 @@ def build_partial_prefill_input(
     # same
     rebuilt_seq_lens = model_input.seq_lens
     assert (len(rebuilt_seq_lens) == original_bs)
-
-    rebuilt_num_prefill_tokens = 0
-    selected_token_indices_padding = 0
-    rebuilt_selected_token_indices = []
 
     # context_lens
     new_num_computed_tokens_list = []
@@ -559,6 +479,7 @@ def build_partial_prefill_input(
     # for example, 257 --> 256 (2*128) if block_size=128
     complete_num_blocks_list = [nt // block_size for nt in new_num_computed_tokens_list]
     rebuilt_context_lens = [nb * block_size for nb in complete_num_blocks_list]
+    has_context = any(rebuilt_context_lens)
 
     # remained seq_lens (query_lens)
     assert(len(rebuilt_seq_lens) == len(rebuilt_context_lens))
@@ -567,7 +488,7 @@ def build_partial_prefill_input(
                            for i in range(original_bs)]
     rebuilt_max_query_len = max(rebuilt_query_lens)
     rebuilt_sum_query_len = sum(rebuilt_query_lens)
-    rebuilt_max_prompt_len = max(find_bucket(rebuilt_query_lens,
+    rebuilt_max_prompt_len = max(find_bucket(rebuilt_max_query_len,
                         HPUBucketingGlobalState().prompt_seq_bucket_cfg),
                         block_size)
 
@@ -592,9 +513,15 @@ def build_partial_prefill_input(
                                              dtype=torch.long,
                                              device=device)
 
-    prefix_block_tables = []
-    block_indices = model_input.attn_metadata.block_indices
-    blk_indices_num_1batch = block_indices // original_bs
+    if has_context:
+        prefix_block_list_tensor = torch.full((original_bs, max(complete_num_blocks_list)),
+                                               _PAD_BLOCK_ID,
+                                               dtype=torch.long,
+                                               device=device)
+    else:
+        prefix_block_list_tensor = None
+
+    block_indices = model_input.attn_metadata.block_indices.reshape(original_bs, -1)
     # NOTE: block_offsets is None in prompt attention
     # check it after chunk-prefill enabled
     assert  model_input.attn_metadata.block_offsets is None
@@ -612,51 +539,23 @@ def build_partial_prefill_input(
                                      device=device)
         update_indices = torch.arange(0, rebuilt_query_lens[idx], device=device)
 
-        rebuilt_input_tokens_tensor.index_cpoy_(idx, update_indices,
+        rebuilt_input_tokens_tensor[idx].index_copy_(-1, update_indices,
                                          token_tensor.index_select(-1, fetch_indices))
 
         # NOTE(woosuk): Here we assume that the first token in the prompt
         # is always the first token in the sequence.
         # input_positions.append(list(range(context_len, seq_len)))
-        rebuilt_input_positions_tensor.index_copy_(idx, update_indices,
+        rebuilt_input_positions_tensor[idx].index_copy_(-1, update_indices,
             model_input.input_positions[idx].index_select(-1, fetch_indices))
 
         # Attn metadata-related
-        rebuilt_slot_mapping_tensor.index_copy_(idx, update_indices,
-            model_input.attn_metadata.slot_mapping[idx].index_select(fetch_indices))
+        rebuilt_slot_mapping_tensor[idx].index_copy_(-1, update_indices,
+            model_input.attn_metadata.slot_mapping[idx].index_select(-1, fetch_indices))
 
-        blk_indices_idx = block_indices[idx * blk_indices_num_1batch:
-                                        (idx + 1) * blk_indices_num_1batch]
-        prefix_block_tables.append(blk_indices_idx[:complete_num_blocks_list[idx]])
-
-
-        # Sampling metadata related
-        # seq_groups (use rebuilt query lens)
-        rebuilt_num_prefill_tokens += rebuilt_query_lens[idx]
-        if idx > 0:
-            selected_token_indices_padding += (rebuilt_max_prompt_len-rebuilt_query_lens[idx - 1])
-        rebuilt_selected_token_indices.append(rebuilt_num_prefill_tokens - 1 +
-                                              selected_token_indices_padding)
-
-    # _prepare_prompt in hpu_model_runner
-    if any(rebuilt_context_lens):
-        max_num_block = max(len(bt) for bt in prefix_block_tables)
-        prefix_block_list = list(
-            itertools.chain.from_iterable(
-                bt if len(bt) == max_num_block else bt +
-                ([_PAD_BLOCK_ID] * (max_num_block - len(bt)))
-                for bt in prefix_block_tables))
-
-        # TODO: pad to proper len
-        pad_len = len(prefix_block_list)
-        prefix_block_list = pad_list(prefix_block_list, pad_len,
-                                        _PAD_BLOCK_ID)
-
-        prefix_block_list_tensor = torch.tensor(prefix_block_list,
-                                                dtype=torch.long,
-                                                device=device)
-    else:
-        prefix_block_list_tensor = None
+        if has_context:
+            prefix_update_indices = torch.arange(0, complete_num_blocks_list[idx], device=device)
+            prefix_block_list_tensor[idx].index_copy_(-1, prefix_update_indices,
+                block_indices[idx].index_select(-1, prefix_update_indices))
 
     rebuilt_block_indices, rebuilt_block_offsets = precompute_indices_and_offsets(
             block_size, rebuilt_slot_mapping_tensor, True)
@@ -676,6 +575,10 @@ def build_partial_prefill_input(
         if rebuilt_sampling_metadata.seq_groups is not None:
             rebuilt_sampling_metadata.seq_groups[idx].query_len = q_len
 
+    paddings = [rebuilt_max_query_len - q for q in rebuilt_query_lens]
+    paddings = [0] + paddings[:-1]
+    paddings = list(itertools.accumulate(paddings))
+    rebuilt_selected_token_indices = [(ql + p - 1) for ql, p in zip(rebuilt_query_lens, paddings)]
     rebuilt_sampling_metadata.selected_token_indices = torch.tensor(
         rebuilt_selected_token_indices,
         dtype=model_input.sampling_metadata.selected_token_indices.dtype,
