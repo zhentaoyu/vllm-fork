@@ -308,7 +308,6 @@ class HpuModelAdapter:
 
     def _set_attn_bias(self, attn_metadata, batch_size, seq_len, device,
                        dtype):
-        logger.info("====set attn bias=======")
         if (attn_metadata is None or self.prefill_use_fusedsdpa
                 or not attn_metadata.is_prompt):
             return attn_metadata
@@ -344,8 +343,6 @@ class HpuModelAdapter:
         attn_bias = (torch.zeros_like(mask, dtype=dtype).masked_fill_(
             mask, -math.inf))
         attn_metadata = prefill_metadata._replace(attn_bias=attn_bias)
-        # import pdb; pdb.set_trace()
-        logger.info(f"attn_metadata updated {attn_metadata}")
         return attn_metadata
 
     def _set_block_mapping(self, metadata, batch_size, device, dtype):
@@ -852,7 +849,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             seq_len = min(seq_data.get_len(), context_len + token_chunk_size)
             prompt_tokens = seq_data.get_token_ids()[context_len:seq_len]
             seq_lens.append(seq_len)
-            logger.info(f"computed_block_nums {computed_block_nums}, context_len {context_len}")
 
             # NOTE: This only works for oooooooxxx style attention.
             if computed_block_nums is not None and len(
@@ -950,8 +946,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             assert not self.scheduler_config.chunked_prefill_enabled
             # prefix caching
 
-            logger.info(f"context_lens {context_lens}")
-            logger.info(f"prefix_block_tables {prefix_block_tables}")
             max_num_block = max(len(bt) for bt in prefix_block_tables)
             prefix_block_list = list(
                 itertools.chain.from_iterable(
@@ -959,13 +953,11 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     ([_PAD_BLOCK_ID] * (max_num_block - len(bt)))
                     for bt in prefix_block_tables))
 
-            logger.info(f"prefix_block_list {prefix_block_list}")
             # TODO: pad to proper len
             pad_len = len(prefix_block_list)
             prefix_block_list = pad_list(prefix_block_list, pad_len,
                                          _PAD_BLOCK_ID)
 
-            logger.info(f"prefix_block_list after padding {prefix_block_list}")
             prefix_block_list_tensor = torch.tensor(prefix_block_list,
                                                     dtype=torch.long,
                                                     device=self.device)
@@ -998,7 +990,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     else:
                         self.rag_start_pos.append(-1)
                         self.rag_end_pos.append(-1)
-        # logger.info(f"input_tokens {input_tokens}")
         logger.info(f"rag_start_pos: {self.rag_start_pos}, rag_end_pos: {self.rag_end_pos}")
 
         input_tokens = make_tensor_with_pad(input_tokens,
@@ -1084,7 +1075,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         dummy_slots = itertools.cycle(
             range(_PAD_SLOT_ID, _PAD_SLOT_ID + self.block_size))
 
-        logger.info(f"input tokens of input: {input_tokens}, seq_lens {seq_lens}")
         for seq_group_metadata in seq_group_metadata_list:
             assert not seq_group_metadata.is_prompt
             assert seq_group_metadata.token_chunk_size == 1
@@ -1101,7 +1091,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 if output is None:
                     generation_token = seq_data.get_last_token_id()
                     input_tokens.append([generation_token])
-                    logger.info(f"seq_id {seq_id}, gen_token {generation_token}, input_tokens {input_tokens}")
 
                 seq_len = seq_data.get_len()
                 position = seq_len - 1
@@ -1299,7 +1288,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                                      seq_lens, query_lens,
                                                      self.device,
                                                      self.pin_memory)
-        logger.info(f"sampling_metadata before {sampling_metadata}")
 
         if not self.scheduler_config.chunked_prefill_enabled:
             assert (len(prefill_reqs) and len(decode_reqs)) == 0
@@ -1339,7 +1327,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             dtype=sampling_metadata.selected_token_indices.dtype,
             device=sampling_metadata.selected_token_indices.device)
         sampling_metadata.selected_token_indices.add_(paddings)
-        logger.info(f"sampling_metadata after {sampling_metadata}")
 
         if self.lora_config:
             lora_mapping = LoRAMapping(
@@ -2150,8 +2137,6 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         model_input,
                         kv_caches=kv_caches
                     )
-                # torch.hpu.synchronize()
-                # logger.info(f"model_input {model_input}")
                 htorch.core.mark_step()
                 logger.info(f"recv kv consume time {time.time() - s0}")
 
@@ -2214,14 +2199,11 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                             broadcast_data["attn_metadata"])
                     })
                 if not bypass_model_exec:
-                    # logger.info(f"input_tokens {input_tokens}")
-                    # logger.info(f"attn_metadata {self.trim_attn_metadata(attn_metadata)}")
                     with self.profiler.record_event('internal', model_event_name):
                         hidden_states = self.model.forward(
                             **execute_model_kwargs,
                             selected_token_indices=sampling_metadata.
                             selected_token_indices)
-                        # torch.hpu.synchronize()
                         logger.info(f"=====model forward done======")
 
                 # Sending KV cache in distributed KV cache transfer setting
@@ -2238,7 +2220,6 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         kv_caches,
                         hidden_states,
                     )
-                    # torch.hpu.synchronize()
                     htorch.core.mark_step()
                     logger.info(f"send kv consume time {time.time() - s0}")
 
@@ -2258,8 +2239,6 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         sampling_metadata.selected_token_indices = None
                     logits = self.model.compute_logits(hidden_states,
                                                        sampling_metadata)
-                    # torch.hpu.synchronize()
-                    # logger.info(f"logits {logits[0]}")
                 htorch.core.mark_step()
                 # Only perform sampling in the driver worker.
                 if not self.is_driver_worker:
@@ -2277,7 +2256,6 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         logits=logits,
                         sampling_metadata=sampling_metadata,
                     )
-                    logger.info(f"output1 {output}")
                     if num_steps > 1:
                         output = output.sampled_token_ids
                         self.cached_step_outputs.append(
