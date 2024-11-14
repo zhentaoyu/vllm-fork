@@ -99,7 +99,6 @@ class DiskKVTransfer(KVLookupBufferBase):
                hidden: torch.Tensor) -> None:
 
         self._work_dir_init("save")
-        logger.info(f"{input_tokens.shape}, {roi.shape}")
 
         t0 = time.time()
         tensor_key = self._encode_tensors(input_tokens, roi) + "_" + str(self.local_rank)
@@ -116,7 +115,6 @@ class DiskKVTransfer(KVLookupBufferBase):
                     roi: torch.Tensor) -> List[Optional[torch.Tensor]]:
 
         self._work_dir_init("load")
-        logger.info(f"{input_tokens.shape}, {roi.shape}")
 
         t0 = time.time()
         tensor_key = self._encode_tensors(input_tokens, roi) + "_" + str(self.local_rank)
