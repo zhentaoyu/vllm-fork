@@ -37,6 +37,7 @@ from vllm.distributed.kv_transfer.kv_lookup_buffer.base import (
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 
+import time
 logger = init_logger(__name__)
 
 # check VLLM_DISTRIBUTERD_KV_ROLE and set corresponding flags
@@ -199,7 +200,7 @@ class KV_transfer_agent:
         # query_lens contains new KV caches that are added to vLLM.
         # so we will send them to decode instance
         # FIXME(Kuntai): This assume that all requests are prefill.
-        logger.info(f"seq_lens tensor in send {input_tokens_tensor.size(-1)} {seq_lens}")
+        logger.debug(f"seq_lens tensor in send {input_tokens_tensor.size(-1)} {seq_lens}")
         for idx, slen in enumerate(seq_lens):
             start_pos = 0
             # # TODO prompt attention with context (query_lens)
@@ -286,15 +287,15 @@ class KV_transfer_agent:
 
         # enumerate different requests
         # FIXME(Kuntai): This impl assumes that all requests are prefill.
-        logger.info(f"seq_lens tensor {input_tokens_tensor.size(-1)} {seq_lens}")
+        logger.debug(f"seq_lens tensor {input_tokens_tensor.size(-1)} {seq_lens}")
 
         # deal with padded bs
         real_bs = model_input.real_batch_size
-        block_indices = model_input.attn_metadata.block_indices
-        block_offsets = model_input.attn_metadata.block_offsets
-        logger.debug(f"input tokens shape is {input_tokens_tensor.shape}, "
-                     f"block_indices is {block_indices}, "
-                     f"block_offsets is {block_offsets}")
+        # block_indices = model_input.attn_metadata.block_indices
+        # block_offsets = model_input.attn_metadata.block_offsets
+        # logger.debug(f"input tokens shape is {input_tokens_tensor.shape}, "
+        #              f"block_indices is {block_indices}, "
+        #              f"block_offsets is {block_offsets}")
 
         for idx, slen in enumerate(seq_lens):
 
@@ -314,7 +315,7 @@ class KV_transfer_agent:
                 bypass_model_exec = False
                 break
 
-            logger.info(f"start_pos {start_pos}, slen {slen}")
+            logger.debug(f"start_pos {start_pos}, slen {slen}")
             logger.debug(f"kv role {envs.VLLM_DISTRIBUTED_KV_ROLE} starts to receive kv")
             # 1. no need to care about padded requests kv cache
             # 2. make a padded hidden_states for sampling if all real requests have
@@ -371,11 +372,12 @@ class KV_transfer_agent:
                     block_indices_cached = torch.div(slot_mapping_cached,
                                                      self.block_size, rounding_mode="floor")
                     block_offsets_cached = torch.fmod(slot_mapping_cached, self.block_size)
-                    logger.debug(f"num_computed_tokens is {num_computed_tokens}, "
-                                 f"block_indices_cached is {block_indices_cached}, "
-                                 f"block_offsets_cached is {block_offsets_cached}")
+                    # logger.debug(f"num_computed_tokens is {num_computed_tokens}, "
+                    #              f"block_indices_cached is {block_indices_cached}, "
+                    #              f"block_offsets_cached is {block_offsets_cached}")
 
                     # put received KV caches into paged memory
+                    t0 = time.time()
                     for i in range(start_layer, end_layer):
                         kv_cache = kv_caches[i - start_layer]
                         key_cache, value_cache = kv_cache[0], kv_cache[1]
@@ -390,7 +392,9 @@ class KV_transfer_agent:
                                                                  block_indices_cached,
                                                                  block_offsets_cached)
 
+                    torch.hpu.synchronize()
                     hidden_or_intermediate_states_for_one_req.append(hidden)
+                    logger.debug(f"load kv cache time is {time.time() - t0}")
 
         if not bypass_model_exec:
             # Some of the KV cache is not retrieved
@@ -398,7 +402,7 @@ class KV_transfer_agent:
             logger.debug(
                 "[rank%d]: Failed to receive all KVs and hidden "
                 "states, redo model forwarding.", torch.distributed.get_rank())
-            logger.info(f"model_input before: {model_input}")
+            logger.debug(f"model_input before: {model_input}")
             self.original_input_tokens_t = model_input.input_tokens
             rebuilt_model_input = build_partial_prefill_input(
                 model_input,
@@ -411,7 +415,7 @@ class KV_transfer_agent:
             )
             model_input = rebuilt_model_input
             hidden_or_intermediate_states = None
-            logger.info(f"model_input after: {model_input}")
+            logger.debug(f"model_input after: {model_input}")
 
         else:
             logger.debug(
@@ -448,7 +452,7 @@ def build_partial_prefill_input(
     """
 
     # no request receive any kv caches
-    logger.info(f"num_computed_tokens_list {num_computed_tokens_list}")
+    logger.debug(f"num_computed_tokens_list {num_computed_tokens_list}")
     if all(nt ==0 for nt in num_computed_tokens_list[:model_input.real_batch_size]):
         return model_input
 

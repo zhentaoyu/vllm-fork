@@ -23,6 +23,8 @@ wait_for_server() {
     done" && return 0 || return 1
 }
 
+export VLLM_KV_TRANSFER_DRIVER="disk_kv_transfer"
+
 # prefilling instance, which is the KV producer
 VLLM_DISTRIBUTED_KV_ROLE=producer CUDA_VISIBLE_DEVICES=0 python3 \
     -m vllm.entrypoints.openai.api_server \
@@ -47,7 +49,9 @@ wait_for_server 8200
 # the workflow of this proxy:
 # - send the request to prefill vLLM instance (port 8100), change max_tokens to 1
 # - after the prefill vLLM finishes prefill, send the request to decode vLLM instance
-python3 ../../benchmarks/disagg_benchmarks/disagg_prefill_proxy_server.py &
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROXY_SERVER_SCRIPT="$SCRIPT_DIR/../../benchmarks/disagg_benchmarks/disagg_prefill_proxy_server.py"
+python3 ${PROXY_SERVER_SCRIPT} &
 sleep 1
 
 # serve two example requests

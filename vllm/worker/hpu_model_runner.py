@@ -940,7 +940,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     else:
                         self.rag_start_pos.append(-1)
                         self.rag_end_pos.append(-1)
-        logger.info(f"rag_start_pos: {self.rag_start_pos}, rag_end_pos: {self.rag_end_pos}")
+        logger.debug(f"rag_start_pos: {self.rag_start_pos}, rag_end_pos: {self.rag_end_pos}")
 
         input_tokens = make_tensor_with_pad(input_tokens,
                                             max_len=max_prompt_len,
@@ -2036,7 +2036,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 self.set_active_loras(model_input.lora_requests,
                                       model_input.lora_mapping)
             input_tokens = model_input.input_tokens
-            logger.info(f"====hpu model runner input size {input_tokens.shape}")
+            logger.debug(f"====hpu model runner input size {input_tokens.shape}")
             input_positions = model_input.input_positions
             attn_metadata = model_input.attn_metadata
             sampling_metadata = model_input.sampling_metadata
@@ -2073,7 +2073,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 if hasattr(self, "rag_end_pos"):
                     get_disagg_group().rag_start_pos = self.rag_start_pos
                     get_disagg_group().rag_end_pos = self.rag_end_pos
-                logger.info(f"start to recev kv.........")
+                logger.debug(f"start to recev kv.........")
                 hidden_states, bypass_model_exec, model_input = \
                     get_disagg_group().recv_kv_caches_and_hidden_states(
                         # self.model is used to know which layer the current worker
@@ -2084,7 +2084,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         kv_caches=kv_caches
                     )
                 htorch.core.mark_step()
-                logger.info(f"recv kv consume time {time.time() - s0}")
+                logger.debug(f"recv kv consume time {time.time() - s0}")
 
             execute_model_kwargs = {
                 "input_ids": input_tokens,
@@ -2150,13 +2150,13 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                             **execute_model_kwargs,
                             selected_token_indices=sampling_metadata.
                             selected_token_indices)
-                        logger.info(f"=====model forward done======")
+                        logger.debug(f"=====model forward done======")
 
                 # Sending KV cache in distributed KV cache transfer setting
                 # NOTE: the send operation is non-blocking
                 s0 = time.time()
                 if num_steps == 1 and not warmup_mode and self.need_send_kv(model_input, kv_caches):
-                    logger.info(f"start to send kv.........")
+                    logger.debug(f"start to send kv.........")
                     get_disagg_group().send_kv_caches_and_hidden_states(
                         # self.model is used to know which layer the current
                         # worker is working on, so that we can send KV for only those
@@ -2167,7 +2167,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         hidden_states,
                     )
                     htorch.core.mark_step()
-                    logger.info(f"send kv consume time {time.time() - s0}")
+                    logger.debug(f"send kv consume time {time.time() - s0}")
 
                 if self.lora_config:
                     LoraMask.setLoraMask(
