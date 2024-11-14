@@ -56,6 +56,35 @@ async def handle_request():
         print(e)
         print("".join(traceback.format_exception(*exc_info)))
 
+@app.route('/v1/chat/completions', methods=['POST'])
+async def handle_request_chat_completions():
+    try:
+        original_request_data = await request.get_json()
+
+        prefill_request = original_request_data.copy()
+        # change max_tokens = 1 to let it only do prefill
+        prefill_request['max_completion_tokens'] = 1
+
+        # finish prefill
+        async for _ in forward_request('http://localhost:8100/v1/chat/completions',
+                                       prefill_request):
+            continue
+
+        # return decode
+        generator = forward_request('http://localhost:8200/v1/chat/completions',
+                                    original_request_data)
+        response = await make_response(generator)
+        response.timeout = None
+
+        return response
+
+    except Exception as e:
+        import sys
+        import traceback
+        exc_info = sys.exc_info()
+        print("Error occurred in disagg prefill proxy server")
+        print(e)
+        print("".join(traceback.format_exception(*exc_info)))
 
 if __name__ == '__main__':
     app.run(port=8000)
