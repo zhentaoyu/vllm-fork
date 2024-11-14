@@ -36,3 +36,13 @@ curl -s http://100.83.111.240:32769/v1/completions \
 
 ## v1/chat/completions
 
+curl -s http://100.83.111.240:32769/v1/chat/completions \
+-H "Content-Type: application/json" \
+-d '{
+"model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+"messages": [{"role": "user", "content": "What is deep learning?"}],
+"max_tokens": 10,
+"temperature": 0
+}'
+
+curl 100.83.111.240:32769/v1/chat/completions  -X POST   -d '{"model":"meta-llama/Meta-Llama-3.1-8B-Instruct", "messages": [{"role": "user", "content": "What is deep learning?"}]}'   -H 'Content-Type: application/json'
