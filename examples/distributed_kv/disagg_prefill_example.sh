@@ -47,7 +47,7 @@ wait_for_server 8200
 # the workflow of this proxy:
 # - send the request to prefill vLLM instance (port 8100), change max_tokens to 1
 # - after the prefill vLLM finishes prefill, send the request to decode vLLM instance
-python3 ../../benchmarks/disagg_benchmarks/disagg_prefill_proxy_server.py &
+python3 benchmarks/disagg_benchmarks/disagg_prefill_proxy_server.py &
 sleep 1
 
 # serve two example requests
@@ -78,5 +78,5 @@ echo "Successfully finished 2 test requests!"
 echo ""
 
 # Cleanup commands, suppressing their output
-ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9 > /dev/null 2>&1
-pkill -f python3 > /dev/null 2>&1
+#ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9 > /dev/null 2>&1
+#pkill -f python3 > /dev/null 2>&1
