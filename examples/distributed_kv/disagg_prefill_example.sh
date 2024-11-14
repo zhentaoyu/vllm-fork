@@ -12,6 +12,7 @@ if python3 -c "import quart" &> /dev/null; then
 else
     echo "Quart is not installed. Installing..."
     python3 -m pip install quart
+    python3 -m pip install flask==3.0.3
 fi 
 
 # a function that waits vLLM server to start
