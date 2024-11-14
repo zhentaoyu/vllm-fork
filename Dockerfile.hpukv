@@ -16,4 +16,4 @@ ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
 RUN pip install -e .
 WORKDIR /workspace/vllm
 
-ENTRYPOINT ["/bin/bash", "./examples/distributed_kv/disagg_prefill_example.sh"]
+ENTRYPOINT ["/bin/bash", "./examples/distributed_kv/disagg_prefill.sh"]
