@@ -25,6 +25,41 @@ async def forward_request(url, data):
                     content = await response.read()
                     yield content
 
+@app.route('/v1/chat/completions', methods=['POST'])
+async def handle_chat_request():
+    try:
+        original_request_data = await request.get_json()
+
+        original_request_data["prompt"] = original_request_data['messages'][0]['content']
+        del original_request_data["messages"]
+        prefill_request = original_request_data.copy()
+        # change max_tokens = 1 to let it only do prefill
+
+        prefill_request['max_tokens'] = 1
+        print("original_request_data = ", original_request_data)
+        print("prefill_request = ", prefill_request)
+
+        # finish prefill
+        async for _ in forward_request('http://localhost:8100/v1/completions',
+                                       prefill_request):
+            continue
+
+        # return decode
+        generator = forward_request('http://localhost:8200/v1/completions',
+                                    original_request_data)
+        response = await make_response(generator)
+        response.timeout = None
+
+        return response
+
+    except Exception as e:
+        import sys
+        import traceback
+        exc_info = sys.exc_info()
+        print("Error occurred in disagg prefill proxy server")
+        print(e)
+        print("".join(traceback.format_exception(*exc_info)))
+
 
 @app.route('/v1/completions', methods=['POST'])
 async def handle_request():
@@ -33,7 +68,11 @@ async def handle_request():
 
         prefill_request = original_request_data.copy()
         # change max_tokens = 1 to let it only do prefill
+                
         prefill_request['max_tokens'] = 1
+        print("original_request_data = ", original_request_data)
+        print("prefill_request = ", prefill_request)
+
 
         # finish prefill
         async for _ in forward_request('http://localhost:8100/v1/completions',
