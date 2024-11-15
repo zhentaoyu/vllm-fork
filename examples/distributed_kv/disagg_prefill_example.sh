@@ -70,12 +70,25 @@ output2=$(curl -s http://localhost:8000/v1/completions \
 "temperature": 0
 }')
 
+output3=$(curl -s http://localhost:8000/v1/chat/completions \
+-H "Content-Type: application/json" \
+-d @- <<EOF
+{
+"model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+"messages": [{"role": "user", "content": "Tell me something about Intel"}],
+"max_tokens": 10,
+"temperature": 0
+}
+EOF
+)
+
 # Print the outputs of the curl requests
 echo ""
 echo "Output of first request: $output1"
 echo "Output of second request: $output2"
+echo "Output of third request: $output3"
 
-echo "Successfully finished 2 test requests!"
+echo "Successfully finished 3 test requests!"
 echo ""
 
 tail -f /dev/null
