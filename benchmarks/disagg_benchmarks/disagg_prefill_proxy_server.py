@@ -64,6 +64,8 @@ async def handle_request_chat_completions():
         prefill_request = original_request_data.copy()
         # change max_tokens = 1 to let it only do prefill
         prefill_request['max_completion_tokens'] = 1
+        print("original_request_data = ", original_request_data)
+        print("prefill_request = ", prefill_request)
 
         # finish prefill
         async for _ in forward_request('http://localhost:8100/v1/chat/completions',
