@@ -87,4 +87,4 @@ async def handle_request_chat_completions():
         print("".join(traceback.format_exception(*exc_info)))
 
 if __name__ == '__main__':
-    app.run(port=8000)
+    app.run(host="0.0.0.0", port=8000)

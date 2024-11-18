@@ -12,6 +12,7 @@ if python3 -c "import quart" &> /dev/null; then
 else
     echo "Quart is not installed. Installing..."
     python3 -m pip install quart
+    python3 -m pip install flask==3.0.3
 fi 
 
 # a function that waits vLLM server to start
@@ -94,6 +95,7 @@ echo "Output of third request: $output3"
 echo "Successfully finished 3 test requests!"
 echo ""
 
+tail -f /dev/null
 # Cleanup commands, suppressing their output
-ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9 > /dev/null 2>&1
-pkill -f python3 > /dev/null 2>&1
+# ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9 > /dev/null 2>&1
+# pkill -f python3 > /dev/null 2>&1
