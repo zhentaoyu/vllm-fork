@@ -41,7 +41,7 @@ curl -s http://100.83.111.240:32769/v1/chat/completions \
 -d '{
 "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
 "messages": [{"role": "user", "content": "What is deep learning?"}],
-"max_tokens": 10,
+"max_completion_tokens": 10,
 "temperature": 0
 }'
 
