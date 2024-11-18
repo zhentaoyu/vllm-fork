@@ -472,8 +472,8 @@ spec:
       - envFrom:
         - configMapRef:
             name: chatqna-config
-        command: ["/bin/bash", "-c"]
-        args: ["tail -f /dev/null"]
+        #command: ["/bin/bash", "-c"]
+        #args: ["tail -f /dev/null"]
         #args: ["python3 -m vllm.entrypoints.openai.api_server --model $LLM_MODEL_ID --tensor-parallel-size 1 --host 0.0.0.0 --port 80 --block-size 128 --max-num-seqs 256 --max-seq_len-to-capture 2048"]
         env:
           - name: OMPI_MCA_btl_vader_single_copy_mechanism
@@ -484,8 +484,8 @@ spec:
             value: "habana"
           - name: HABANA_VISIBLE_DEVICES
             value: "all"
-        image: vllm-hpukv-no-command:latest
-        #image: vllm-hpukv:latest
+        #image: vllm-hpukv-no-command:latest
+        image: vllm-hpukv:latest
 
         imagePullPolicy: IfNotPresent
         name: llm-dependency-deploy

@@ -46,3 +46,9 @@ curl -s http://100.83.111.240:32769/v1/chat/completions \
 }'
 
 curl 100.83.111.240:32769/v1/chat/completions  -X POST   -d '{"model":"meta-llama/Meta-Llama-3.1-8B-Instruct", "messages": [{"role": "user", "content": "What is deep learning?"}]}'   -H 'Content-Type: application/json'
+
+curl 10.106.53.93:9009/v1/chat/completions  -X POST   -d '{"model":"meta-llama/Meta-Llama-3.1-8B-Instruct", "messages": [{"role": "user", "content": "\n### You are a helpful, respectful and honest assistant to help the user with questions.Please refer to the search results obtained from the local knowledge base. But be careful to not incorporate the information that you think is not relevant to the question. If you dont know the answer to a question, please dont share false information. \n\n### Search results:  \n\n### Question: what is artificial intelligence. \n\n### Answer:\n"}], "max_tokens":256, "n": 1, "stream":false}'   -H 'Content-Type: application/json'
+
+## OPEA
+
+curl 10.107.4.218:8888/v1/chatqna -H "Content-Type: application/json" -d '{"messages": "what is artificial intelligence.", "max_tokens":128}'
