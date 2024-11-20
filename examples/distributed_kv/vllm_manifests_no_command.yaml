@@ -12,10 +12,12 @@ data:
   EMBEDDING_SERVER_HOST_IP: embedding-dependency-svc
   HUGGINGFACEHUB_API_TOKEN: ${HF_TOKEN}
   INDEX_NAME: rag-redis
-  #LLM_MODEL_ID: Intel/neural-chat-7b-v3-3
+    #LLM_MODEL: Intel/neural-chat-7b-v3-3
   #LLM_MODEL_ID: meta-llama/Meta-Llama-3-8B
-  LLM_MODEL: meta-llama/Meta-Llama-3.1-8B-Instruct
+  #LLM_MODEL:
+  LLM_PROMPT: "WHO ARE U---------------------------"
   LLM_MODEL_ID: meta-llama/Meta-Llama-3.1-8B-Instruct
+  LLM_MODEL: meta-llama/Meta-Llama-3.1-8B-Instruct
   LLM_SERVER_HOST_IP: llm-dependency-svc
   NODE_SELECTOR: opea
   REDIS_URL: redis://vector-db.default.svc.cluster.local:6379
@@ -26,10 +28,13 @@ data:
   TEI_ENDPOINT: http://embedding-dependency-svc.default.svc.cluster.local:6006
   TEI_RERANKING_ENDPOINT: http://reranking-dependency-svc.default.svc.cluster.local:8808
   TGI_LLM_ENDPOINT: http://llm-dependency-svc.default.svc.cluster.local:9009
+
+  VLLM_SKIP_WARMUP: "true"
+  LLM_KV_TRANSFER_DRIVER: "disk_kv_transfer"
   LLM_SERVER_PORT: '9009'
   RERANK_SERVER_PORT: '8808'
   EMBEDDING_SERVER_PORT: '6006'
-  VLLM_SKIP_WARMUP: "true"
+
 ---
 # Source: chatqna-charts/templates/service.yaml
 # Copyright (C) 2024 Intel Corporation
@@ -89,7 +94,7 @@ spec:
   ports:
     - name: service
       port: 9009
-      targetPort: 80
+      targetPort: 8000
   selector:
     app: llm-dependency-deploy
   type: ClusterIP
@@ -167,7 +172,7 @@ spec:
       - envFrom:
         - configMapRef:
             name: chatqna-config
-        image: opea/chatqna:latest
+        image: opea/chatqna-display-output:latest
 
         imagePullPolicy: IfNotPresent
         name: chatqna-backend-server-deploy
@@ -468,25 +473,9 @@ spec:
       - envFrom:
         - configMapRef:
             name: chatqna-config
-        #command: ["/bin/bash", "-c"]
+        command: ["/bin/bash", "-c"]
+        args: ["tail -f /dev/null"]
         #args: ["python3 -m vllm.entrypoints.openai.api_server --model $LLM_MODEL_ID --tensor-parallel-size 1 --host 0.0.0.0 --port 80 --block-size 128 --max-num-seqs 256 --max-seq_len-to-capture 2048"]
-        args:
-          - "--model"
-          - "meta-llama/Meta-Llama-3.1-8B-Instruct"
-          - "--tensor-parallel-size"
-          - "1"
-          - "--gpu-memory-utilization"
-          - "0.5"
-          - "--max-num-seqs"
-          - "256"
-          - "--block-size"
-          - "128"
-          - "--max-seq-len-to-capture"
-          - "2048"
-          - "--host"
-          - "0.0.0.0"
-          - "--port"
-          - "80"
         env:
           - name: OMPI_MCA_btl_vader_single_copy_mechanism
             value: "none"
@@ -496,17 +485,16 @@ spec:
             value: "habana"
           - name: HABANA_VISIBLE_DEVICES
             value: "all"
-        image: opea/vllm-hpu:latest
-        #image: opea/llm-vllm-hpu:latest
+        image: vllm-hpukv-no-command:latest
+        #image: vllm-hpukv:latest
 
-        #imagePullPolicy: IfNotPresent
-        imagePullPolicy: Always
+        imagePullPolicy: IfNotPresent
         name: llm-dependency-deploy
         ports:
-          - containerPort: 80
+          - containerPort: 8000
         resources:
           limits:
-            habana.ai/gaudi: 1
+            habana.ai/gaudi: 2
         volumeMounts:
           - mountPath: /data
             name: model-volume
