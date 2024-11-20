@@ -46,17 +46,18 @@ class DiskKVTransfer(KVLookupBufferBase):
         # tensor2_clone = tensor2.clone()
         # tensor1_bytes = tensor1.cpu().numpy().tobytes()
         # tensor2_bytes = tensor2.cpu().numpy().tobytes()
-        t0 = time.time()
-        # assuming it's a bool mask
-        roi_tokens = input_tokens[roi.to(bool)]
+        t0 = time.perf_counter()
+        # longest continuous tokens
+        roi_indices = torch.arange(0, roi.size(-1), device=input_tokens.device)
+        roi_tokens = input_tokens.index_select(-1, roi_indices)
         combined_bytes = roi_tokens.cpu().numpy().tobytes()
         # torch.hpu.synchronize()
-        logger.debug(f"2 tensors to bytes time is {time.time() - t0}")
+        logger.debug(f"2 tensors to bytes time is {time.perf_counter() - t0}")
 
-        t0 = time.time()
+        t0 = time.perf_counter()
         hash_object = hashlib.sha256(combined_bytes)
         hash_value = hash_object.hexdigest()
-        logger.debug(f"gen hash key time is {time.time() - t0}")
+        logger.debug(f"gen hash key time is {time.perf_counter() - t0}")
 
         return hash_value
 
@@ -64,12 +65,12 @@ class DiskKVTransfer(KVLookupBufferBase):
                      device: Union[str, torch.device]) -> None:
 
         assert isinstance(tensor, torch.Tensor)
-        t0 = time.time()
+        t0 = time.perf_counter()
         tensor_device = tensor.to(device)
-        logger.debug(f"tensor to cpu time is {time.time() - t0}")
-        t0 = time.time()
+        logger.debug(f"tensor to cpu time is {time.perf_counter() - t0}")
+        t0 = time.perf_counter()
         torch.save(tensor_device, name)
-        logger.debug(f"tensor save time is {time.time() - t0}")
+        logger.debug(f"tensor save time is {time.perf_counter() - t0}")
         logger.debug(f"local_rank: {self.local_rank}, rank: {self.rank} "\
                      f"save tensor with shape {tensor.shape} into {name}")
 
@@ -79,14 +80,14 @@ class DiskKVTransfer(KVLookupBufferBase):
             if not os.path.exists(name):
                 logger.warning(f"cache path {name} does not exist.")
                 return None
-            t0 = time.time()
-            tensor_cpu = torch.load(name, weights_only=True)
-            logger.debug(f"tensor load time is {time.time() - t0}")
+            t0 = time.perf_counter()
+            tensor_cpu = torch.load(name)
+            logger.debug(f"tensor load time is {time.perf_counter() - t0}")
             logger.debug(f"local_rank: {self.local_rank}, rank: {self.rank} "\
                         f"load tensor with shape {tensor_cpu.shape} from {name}")
-            t0 = time.time()
+            t0 = time.perf_counter()
             tensortt = tensor_cpu.to(device)
-            logger.debug(f"tensor to hpu time is {time.time() - t0}")
+            logger.debug(f"tensor to hpu time is {time.perf_counter() - t0}")
             return tensortt
             # return tensor_cpu.to(device)
         except Exception as e:
@@ -100,9 +101,9 @@ class DiskKVTransfer(KVLookupBufferBase):
 
         self._work_dir_init("save")
 
-        t0 = time.time()
+        t0 = time.perf_counter()
         tensor_key = self._encode_tensors(input_tokens, roi) + "_" + str(self.local_rank)
-        logger.debug(f"tensor hash time is {time.time() - t0}")
+        logger.debug(f"tensor hash time is {time.perf_counter() - t0}")
         key_path = os.path.join(self.work_dir, tensor_key + "_key.pt")
         val_path = os.path.join(self.work_dir, tensor_key + "_value.pt")
         hid_path = os.path.join(self.work_dir, tensor_key + "_hidden.pt")
@@ -116,9 +117,9 @@ class DiskKVTransfer(KVLookupBufferBase):
 
         self._work_dir_init("load")
 
-        t0 = time.time()
+        t0 = time.perf_counter()
         tensor_key = self._encode_tensors(input_tokens, roi) + "_" + str(self.local_rank)
-        logger.debug(f"tensor hash time is {time.time() - t0}")
+        logger.debug(f"tensor hash time is {time.perf_counter() - t0}")
         key_path = os.path.join(self.work_dir, tensor_key + "_key.pt")
         val_path = os.path.join(self.work_dir, tensor_key + "_value.pt")
         hid_path = os.path.join(self.work_dir, tensor_key + "_hidden.pt")

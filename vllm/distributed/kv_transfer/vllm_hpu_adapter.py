@@ -90,6 +90,7 @@ class KV_transfer_agent:
         self.block_size = 128
         # TODO remove
         self.original_input_tokens_t = None
+        self.original_slot_mapping = None
 
         if self.kv_transfer_driver == "simple_buffer":
             import vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer as sklb
@@ -183,12 +184,13 @@ class KV_transfer_agent:
     ) -> None:
 
         input_tokens_tensor = model_input.input_tokens
-        # TODO remove
-        if self.original_input_tokens_t is not None:
-            input_tokens_tensor = self.original_input_tokens_t
         seq_lens = model_input.seq_lens
         # query_lens = model_input.query_lens
         slot_mapping = model_input.attn_metadata.slot_mapping
+        # TODO remove
+        if self.original_input_tokens_t is not None:
+            input_tokens_tensor = self.original_input_tokens_t
+            slot_mapping = self.original_slot_mapping
         try:
             start_layer = model_executable.model.start_layer
             end_layer = model_executable.model.end_layer
@@ -372,12 +374,8 @@ class KV_transfer_agent:
                     block_indices_cached = torch.div(slot_mapping_cached,
                                                      self.block_size, rounding_mode="floor")
                     block_offsets_cached = torch.fmod(slot_mapping_cached, self.block_size)
-                    # logger.debug(f"num_computed_tokens is {num_computed_tokens}, "
-                    #              f"block_indices_cached is {block_indices_cached}, "
-                    #              f"block_offsets_cached is {block_offsets_cached}")
 
                     # put received KV caches into paged memory
-                    t0 = time.time()
                     for i in range(start_layer, end_layer):
                         kv_cache = kv_caches[i - start_layer]
                         key_cache, value_cache = kv_cache[0], kv_cache[1]
@@ -392,9 +390,7 @@ class KV_transfer_agent:
                                                                  block_indices_cached,
                                                                  block_offsets_cached)
 
-                    torch.hpu.synchronize()
                     hidden_or_intermediate_states_for_one_req.append(hidden)
-                    logger.debug(f"load kv cache time is {time.time() - t0}")
 
         if not bypass_model_exec:
             # Some of the KV cache is not retrieved
@@ -402,8 +398,9 @@ class KV_transfer_agent:
             logger.debug(
                 "[rank%d]: Failed to receive all KVs and hidden "
                 "states, redo model forwarding.", torch.distributed.get_rank())
-            logger.debug(f"model_input before: {model_input}")
+            # logger.debug(f"model_input before: {model_input}")
             self.original_input_tokens_t = model_input.input_tokens
+            self.original_slot_mapping = model_input.attn_metadata.slot_mapping
             rebuilt_model_input = build_partial_prefill_input(
                 model_input,
                 input_tokens_list,
@@ -415,7 +412,7 @@ class KV_transfer_agent:
             )
             model_input = rebuilt_model_input
             hidden_or_intermediate_states = None
-            logger.debug(f"model_input after: {model_input}")
+            # logger.debug(f"model_input after: {model_input}")
 
         else:
             logger.debug(
@@ -425,6 +422,16 @@ class KV_transfer_agent:
                 hidden_or_intermediate_states_for_one_req, dim=0)
 
         return hidden_or_intermediate_states, bypass_model_exec, model_input
+
+
+def _get_indices_and_offsets(slot_mapping, block_size):
+    sm_flatten = slot_mapping.flatten()
+    indices = torch.div(sm_flatten, block_size, rounding_mode="floor")
+    # only for prompt now
+    indices = indices.unflatten(0, (-1, block_size))[:, 0]
+    offsets = None
+
+    return indices, offsets
 
 def build_partial_prefill_input(
     model_input: "ModelInputForHPUWithSamplingMetadata",
@@ -459,9 +466,8 @@ def build_partial_prefill_input(
     from vllm.worker.hpu_model_runner import (_PAD_SLOT_ID,
                                               _PAD_BLOCK_ID,
                                               find_bucket,
-                                              HPUBucketingGlobalState,
-                                              pad_list,
-                                              precompute_indices_and_offsets)
+                                              HPUBucketingGlobalState
+                                            )
 
     original_bs, padded_seq_len = model_input.input_tokens.size()
     # same
@@ -525,7 +531,8 @@ def build_partial_prefill_input(
     else:
         prefix_block_list_tensor = None
 
-    block_indices = model_input.attn_metadata.block_indices.reshape(original_bs, -1)
+    block_indices, _ = _get_indices_and_offsets(model_input.attn_metadata.slot_mapping, block_size)
+    block_indices = block_indices.reshape(original_bs, -1)
     # NOTE: block_offsets is None in prompt attention
     # check it after chunk-prefill enabled
     assert  model_input.attn_metadata.block_offsets is None
@@ -561,17 +568,18 @@ def build_partial_prefill_input(
             prefix_block_list_tensor[idx].index_copy_(-1, prefix_update_indices,
                 block_indices[idx].index_select(-1, prefix_update_indices))
 
-    rebuilt_block_indices, rebuilt_block_offsets = precompute_indices_and_offsets(
-            block_size, rebuilt_slot_mapping_tensor, True)
+    # will be set in HPUModelAdapter
+    rebuilt_block_indices, rebuilt_block_offsets = None, None
 
     # rebuilt attn_metadata
     rebuilt_attn_metadata = deepcopy(model_input.attn_metadata)
-    rebuilt_attn_metadata.block_list = prefix_block_list_tensor
+    rebuilt_attn_metadata.block_list = prefix_block_list_tensor.reshape(-1)
     rebuilt_attn_metadata.block_indices = rebuilt_block_indices
     rebuilt_attn_metadata.block_offsets = rebuilt_block_offsets
     rebuilt_attn_metadata.seq_lens_tensor = rebuilt_seq_lens_tensor
     rebuilt_attn_metadata.context_lens_tensor = rebuilt_context_lens_tensor
     rebuilt_attn_metadata.num_prefill_tokens = rebuilt_sum_query_len
+    rebuilt_attn_metadata.slot_mapping = rebuilt_slot_mapping_tensor
 
     # rebuilt sampling_metadata
     rebuilt_sampling_metadata = deepcopy(model_input.sampling_metadata)

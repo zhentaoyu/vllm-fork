@@ -968,7 +968,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                            dtype=torch.long,
                                            device='cpu')
 
-        if prefix_block_list_tensor:
+        if prefix_block_list_tensor is not None:
             prefix_block_list_tensor = prefix_block_list_tensor.to(
                 self.device, non_blocking=True)
         input_tokens = input_tokens.to(  # type: ignore
@@ -2029,6 +2029,32 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 model_input) if self.is_driver_worker else []
             torch.hpu.synchronize()
         if model_input.is_first_multi_step:
+            # Receive KV cache in distributed KV cache transfer setting
+            # In disagg prefill setting, it will also recv hidden states and bypass
+            # model forwarding
+            # In KV cache database setting, it will change the model input so that
+            # we can skip prefilling on tokens that successfully received KV caches
+            # NOTE: The receive operation is blocking
+            bypass_model_exec = False
+            s0 = time.perf_counter()
+            if num_steps == 1 and not warmup_mode and self.need_recv_kv(model_input, kv_caches):
+                if hasattr(self, "rag_end_pos"):
+                    get_disagg_group().rag_start_pos = self.rag_start_pos
+                    get_disagg_group().rag_end_pos = self.rag_end_pos
+                logger.debug(f"start to recev kv.........")
+                hidden_states, bypass_model_exec, model_input = \
+                    get_disagg_group().recv_kv_caches_and_hidden_states(
+                        # self.model is used to know which layer the current worker
+                        # is working on, so that we can receive KV for only those
+                        # layers.
+                        self.model.model,
+                        model_input,
+                        kv_caches=kv_caches
+                    )
+                htorch.core.mark_step()
+                # torch.hpu.synchronize()
+                logger.debug(f"recv kv consume time {time.perf_counter() - s0}")
+
             # first multi-step
             if self.lora_config:
                 assert model_input.lora_requests is not None
@@ -2037,6 +2063,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                                       model_input.lora_mapping)
             input_tokens = model_input.input_tokens
             logger.debug(f"====hpu model runner input size {input_tokens.shape}")
+            # logger.debug(f"model input {model_input}")
             input_positions = model_input.input_positions
             attn_metadata = model_input.attn_metadata
             sampling_metadata = model_input.sampling_metadata
@@ -2060,31 +2087,6 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 lora_mask, lora_logits_mask = self.create_lora_mask(
                     input_tokens, model_input.lora_ids,
                     attn_metadata.is_prompt)
-
-            # Receive KV cache in distributed KV cache transfer setting
-            # In disagg prefill setting, it will also recv hidden states and bypass
-            # model forwarding
-            # In KV cache database setting, it will change the model input so that
-            # we can skip prefilling on tokens that successfully received KV caches
-            # NOTE: The receive operation is blocking
-            bypass_model_exec = False
-            s0 = time.time()
-            if num_steps == 1 and not warmup_mode and self.need_recv_kv(model_input, kv_caches):
-                if hasattr(self, "rag_end_pos"):
-                    get_disagg_group().rag_start_pos = self.rag_start_pos
-                    get_disagg_group().rag_end_pos = self.rag_end_pos
-                logger.debug(f"start to recev kv.........")
-                hidden_states, bypass_model_exec, model_input = \
-                    get_disagg_group().recv_kv_caches_and_hidden_states(
-                        # self.model is used to know which layer the current worker
-                        # is working on, so that we can receive KV for only those
-                        # layers.
-                        self.model.model,
-                        model_input,
-                        kv_caches=kv_caches
-                    )
-                htorch.core.mark_step()
-                logger.debug(f"recv kv consume time {time.time() - s0}")
 
             execute_model_kwargs = {
                 "input_ids": input_tokens,
@@ -2146,15 +2148,18 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     })
                 if not bypass_model_exec:
                     with self.profiler.record_event('internal', model_event_name):
+                        tf = time.perf_counter()
                         hidden_states = self.model.forward(
                             **execute_model_kwargs,
                             selected_token_indices=sampling_metadata.
                             selected_token_indices)
+                        # torch.hpu.synchronize()
+                        logger.debug(f"model forward time is {time.perf_counter() - tf}")
                         logger.debug(f"=====model forward done======")
 
                 # Sending KV cache in distributed KV cache transfer setting
                 # NOTE: the send operation is non-blocking
-                s0 = time.time()
+                s0 = time.perf_counter()
                 if num_steps == 1 and not warmup_mode and self.need_send_kv(model_input, kv_caches):
                     logger.debug(f"start to send kv.........")
                     get_disagg_group().send_kv_caches_and_hidden_states(
@@ -2167,7 +2172,8 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         hidden_states,
                     )
                     htorch.core.mark_step()
-                    logger.debug(f"send kv consume time {time.time() - s0}")
+                    # torch.hpu.synchronize()
+                    logger.debug(f"send kv consume time {time.perf_counter() - s0}")
 
                 if self.lora_config:
                     LoraMask.setLoraMask(
