@@ -40,8 +40,6 @@ wait_for_server() {
 }
 
 export VLLM_KV_TRANSFER_DRIVER="disk_kv_transfer"
-# prompt_attention_with_context has no FUSEDSDPA implementation yet
-export VLLM_PROMPT_USE_FUSEDSDPA=false
 
 # prefilling instance, which is the KV producer
  VLLM_DISTRIBUTED_KV_ROLE=producer python3 \
