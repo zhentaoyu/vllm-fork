@@ -464,10 +464,9 @@ def build_partial_prefill_input(
         return model_input
 
     from vllm.worker.hpu_model_runner import (_PAD_SLOT_ID,
-                                              _PAD_BLOCK_ID,
-                                              find_bucket,
-                                              HPUBucketingGlobalState
-                                            )
+                                              _PAD_BLOCK_ID)
+    from vllm_hpu_extension.bucketing import (HPUBucketingGlobalState,
+                                              find_bucket)
 
     original_bs, padded_seq_len = model_input.input_tokens.size()
     # same
@@ -501,6 +500,8 @@ def build_partial_prefill_input(
     rebuilt_max_prompt_len = max(find_bucket(rebuilt_max_query_len,
                         HPUBucketingGlobalState().prompt_seq_bucket_cfg),
                         block_size)
+    logger.debug(f"HPUBucketingGlobalState {HPUBucketingGlobalState().prompt_seq_bucket_cfg}")
+    logger.debug(f"rebuilt_max_prompt_len {rebuilt_max_prompt_len}")
 
     rebuilt_input_tokens_tensor = torch.zeros((original_bs, rebuilt_max_prompt_len),
                                         dtype=torch.long,
