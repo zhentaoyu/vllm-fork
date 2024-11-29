@@ -844,7 +844,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             # Compute the slot mapping.
             slot_mapping.append([])
             block_table = seq_group_metadata.block_tables[seq_id]
-            # import pdb; pdb.set_trace()
 
             # Mask the [0, start_idx) tokens of the prompt with _PAD_SLOT_ID,
             # where start_idx is max(0, seq_len - sliding_window).
@@ -867,7 +866,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 slot = block_number * self.block_size + block_offset
                 slot_mapping[-1].append(slot)
 
-        # import pdb; pdb.set_trace()
         max_query_len = max(query_lens)
         sum_query_len = sum(query_lens)
         real_num_seqs = len(query_lens)
@@ -919,6 +917,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         # TODO remove it for unified API
         rag_suffix_tokens = [14711, 16225, 25]
         rs_len = 3
+        # for chat completions
+        # template_end = [0, 1, 2]
         self.rag_start_pos = []
         self.rag_end_pos = []
         for idx in range(len(input_tokens)):
@@ -936,10 +936,15 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                            input_tokens[idx][i]] == rag_suffix_tokens:
                            self.rag_start_pos.append(0)
                            self.rag_end_pos.append(i)
+                           # remove template_end tokens in rag save phase
+                        #    if (i != seq_len - 1) and (i + len(template_end) == seq_len -1):
+                        #        if input_tokens[idx][i + 1:] == template_end:
+                        #            input_tokens[idx] = input_tokens[idx][:i+1]
                            break
                     else:
                         self.rag_start_pos.append(-1)
                         self.rag_end_pos.append(-1)
+                        break
         logger.debug(f"rag_start_pos: {self.rag_start_pos}, rag_end_pos: {self.rag_end_pos}")
 
         input_tokens = make_tensor_with_pad(input_tokens,
@@ -1217,6 +1222,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             seq_group_metadata_list.extend(dummy_seq_group_metadata
                                            for _ in range(batch_size_padding))
 
+        # logger.debug(f"========hpu model runner requests info===========")
+        # logger.debug(f"seq_group_metadata_list {seq_group_metadata_list}")
         prefill_reqs = []
         decode_reqs = []
         for seq_group_meta in seq_group_metadata_list:
@@ -2062,8 +2069,6 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 self.set_active_loras(model_input.lora_requests,
                                       model_input.lora_mapping)
             input_tokens = model_input.input_tokens
-            logger.debug(f"====hpu model runner input size {input_tokens.shape}")
-            # logger.debug(f"model input {model_input}")
             input_positions = model_input.input_positions
             attn_metadata = model_input.attn_metadata
             sampling_metadata = model_input.sampling_metadata
@@ -2147,6 +2152,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                             broadcast_data["attn_metadata"])
                     })
                 if not bypass_model_exec:
+                    logger.debug(f"====hpu model runner input size {input_tokens.shape}")
                     with self.profiler.record_event('internal', model_event_name):
                         tf = time.perf_counter()
                         hidden_states = self.model.forward(
@@ -2192,6 +2198,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     logits = self.model.compute_logits(hidden_states,
                                                        sampling_metadata)
                 htorch.core.mark_step()
+                logger.debug(f"=======hidden shape {hidden_states.shape}, logits shape {logits.shape}")
                 # Only perform sampling in the driver worker.
                 if not self.is_driver_worker:
                     continue
@@ -2291,6 +2298,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     if model_input.is_prompt:
                         output.prefill_hidden_states = hidden_states
                     output.hidden_states = hidden_states
+                # logger.debug(f"output {output}")
                 return [output] if self.is_driver_worker else []
             else:
                 return []

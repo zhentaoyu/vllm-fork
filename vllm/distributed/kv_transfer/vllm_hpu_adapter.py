@@ -203,7 +203,9 @@ class KV_transfer_agent:
         # so we will send them to decode instance
         # FIXME(Kuntai): This assume that all requests are prefill.
         logger.debug(f"seq_lens tensor in send {input_tokens_tensor.size(-1)} {seq_lens}")
-        for idx, slen in enumerate(seq_lens):
+        # ignore padded request
+        send_seq_lens = seq_lens[:model_input.real_batch_size]
+        for idx, slen in enumerate(send_seq_lens):
             start_pos = 0
             # # TODO prompt attention with context (query_lens)
             end_pos = start_pos + slen

@@ -19,7 +19,7 @@ kill_hpu_processes() {
   # kill all processes on HPU.
   # pkill -f pt_main_thread
   # pkill -f python3
-  # ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9
+  ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9
   ps -e | grep python3 | awk '{print $1}' | xargs kill -9
   for port in 8000 8100 8200; do lsof -t -i:$port | xargs -r kill -9; done
   sleep 1
@@ -71,6 +71,7 @@ launch_disagg_prefill() {
   # disagg prefill
   # 17k-0.5
   # --max-seq-len-to-capture
+  # --enforce-eager \
   VLLM_PORT=12345 VLLM_DISTRIBUTED_KV_ROLE=producer python3 \
       -m vllm.entrypoints.openai.api_server \
       --model $model \
@@ -101,27 +102,40 @@ benchmark() {
   model="shenzhi-wang/Llama3.1-8B-Chinese-Chat"   #"meta-llama/Meta-Llama-3.1-70B-Instruct"
   dataset_name="sonnet"
   dataset_path="../sonnet_4x.txt"
-  num_prompts=4
+  num_prompts=400
   qps=$1
   prefix_len=50
-  input_len=1024
+  input_len=2048
   output_len=$2
   tag=$3
+  rag_bench=$4
+  prepare_rag=$5
 
-  python3 ../benchmark_serving.py \
-          --backend vllm \
-          --model $model \
-          --dataset-name $dataset_name \
-          --dataset-path $dataset_path \
-          --sonnet-input-len $input_len \
-          --sonnet-output-len $output_len \
-          --sonnet-prefix-len $prefix_len \
-          --num-prompts $num_prompts \
-          --port 8000 \
-          --save-result \
-          --result-dir $results_folder \
-          --result-filename $tag-qps-$qps.json \
-          --request-rate $qps
+  args=()
+  args+=(--backend vllm)
+  args+=(--model $model)
+  args+=(--dataset-name $dataset_name)
+  args+=(--dataset-path $dataset_path)
+  args+=(--sonnet-input-len $input_len)
+  args+=(--sonnet-output-len $output_len)
+  args+=(--sonnet-prefix-len $prefix_len)
+  args+=(--num-prompts $num_prompts)
+  args+=(--port 8000)
+  args+=(--save-result)
+  args+=(--result-dir $results_folder)
+  args+=(--result-filename $tag-qps-$qps.json)
+  args+=(--request-rate $qps)
+  # avoiding empty first token if meets eos_token_id
+  args+=(--ignore-eos)
+  if [ "${rag_bench}" = "true" ]; then
+    args+=(--rag_kv-cache-offload-bench)
+  fi
+  if [ "${prepare_rag}" = "true" ]; then
+    args+=(--prepare-rag-kv-cache)
+  fi
+  echo "Running: python3 ../benchmark_serving.py ${args[@]}"
+
+  python3 ../benchmark_serving.py ${args[@]}
 
   sleep 2
 
@@ -150,15 +164,15 @@ main() {
   rm -rf results
   mkdir results
 
-  default_output_len=6
+  default_output_len=32
 
-  export VLLM_LOGGING_LEVEL=DEBUG
   export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
   # "simple_buffer"
   export VLLM_KV_TRANSFER_DRIVER="disk_kv_transfer"
 
-  # required to be true for tensor parallel inference with HPU Graphs
-  export PT_HPU_ENABLE_LAZY_COLLECTIVES=true
+  # required to be true for HCCL collectives with HPU Graphs
+  # export PT_HPU_ENABLE_LAZY_COLLECTIVES=true
+  # export PT_HPU_LAZY_MODE=0
   # for hpu graphs warmup
   # export VLLM_PROMPT_BS_BUCKET_MIN=1      # (default:1)
   # export VLLM_PROMPT_BS_BUCKET_STEP=4     # (default:32)
@@ -174,19 +188,26 @@ main() {
   # export VLLM_DECODE_BS_BUCKET_STEP=8     # (default:32)
   # export VLLM_DECODE_BS_BUCKET_MAX=64     # (default:256)
 
-  # launch_baseline_prefill
-  # for qps in 1; do
-  # benchmark $qps $default_output_len baseline_prefill
+  # prepare rag kv cache
+  # launch_disagg_prefill
+  # for qps in 4; do
+  # benchmark $qps 2 save_rag true true
   # done
   # kill_hpu_processes
 
-  launch_disagg_prefill
-  for qps in 2; do
-  benchmark $qps $default_output_len disagg_prefill
+  launch_baseline_prefill
+  for qps in 2 4 6 8; do
+  benchmark $qps $default_output_len baseline_prefill
   done
   kill_hpu_processes
 
-  # python3 visualize_benchmark_results.py --device "hpu"
+  launch_disagg_prefill
+  for qps in 2 4 6 8; do
+  benchmark $qps $default_output_len disagg_prefill true false
+  done
+  kill_hpu_processes
+
+  python3 visualize_benchmark_results.py --device "hpu"
 
 }
 

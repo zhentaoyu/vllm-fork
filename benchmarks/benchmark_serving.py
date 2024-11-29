@@ -136,6 +136,8 @@ def sample_sonnet_requests(
     output_len: int,
     prefix_len: int,
     tokenizer: PreTrainedTokenizerBase,
+    rag_kv_cache_offload_bench: bool = False,
+    prepare_rag_kv_cache: bool = False,
 ) -> List[Tuple[str, str, int, int, None]]:
     assert (
         input_len > prefix_len
@@ -178,8 +180,12 @@ def sample_sonnet_requests(
 
     # Sample the rest of lines per request.
     sampled_requests: List[Tuple[str, int, int]] = []
-    for _ in range(num_requests):
+
+    seeds = [i for i in range(num_requests)]
+    for i in range(num_requests):
         num_lines_needed = num_input_lines - num_prefix_lines
+        # make requests have same prompts if run several times of benchmark
+        random.seed(seeds[i])
         sampled_lines = "".join(prefix_lines +
                                 random.choices(poem_lines, k=num_lines_needed))
 
@@ -192,6 +198,19 @@ def sample_sonnet_requests(
         ]
         prompt_formatted = tokenizer.apply_chat_template(
             message, add_generation_prompt=True, tokenize=False)
+
+        # simulate RAG kv cache offload benchmark
+        if rag_kv_cache_offload_bench:
+            prompt_context = prompt_formatted[:-32]
+            # keep short user prompt (for example, 32)
+            prompt_user = prompt_formatted[-32:]
+            rag_suffix = "### Question:"
+            if prepare_rag_kv_cache:
+                prompt_formatted = prompt_context + rag_suffix
+            else:
+                # TODO " " makes "### Question:" have the same token_ids in sentence
+                prompt_formatted = prompt_context + rag_suffix + " " + prompt_user
+
         prompt_len = len(tokenizer(prompt_formatted).input_ids)
         sampled_requests.append(
             (prompt, prompt_formatted, prompt_len, output_len, None))
@@ -773,6 +792,8 @@ def main(args: argparse.Namespace):
                 output_len=args.sonnet_output_len,
                 prefix_len=args.sonnet_prefix_len,
                 tokenizer=tokenizer,
+                rag_kv_cache_offload_bench=args.rag_kv_cache_offload_bench,
+                prepare_rag_kv_cache=args.prepare_rag_kv_cache,
             )
             input_requests = [(prompt_formatted, prompt_len, output_len, None)
                               for prompt, prompt_formatted, prompt_len,
@@ -1087,6 +1108,18 @@ if __name__ == "__main__":
         default=200,
         help=
         "Number of prefix tokens per request, used only for sonnet dataset.",
+    )
+    sonnet_group.add_argument(
+        "--rag-kv-cache-offload-bench",
+        action="store_true",
+        help=
+        "RAG kv cache offload benchmark (simulation), used only for sonnet dataset.",
+    )
+    sonnet_group.add_argument(
+        "--prepare-rag-kv-cache",
+        action="store_true",
+        help=
+        "Prepare RAG kv cache (simulation), used only for sonnet dataset.",
     )
 
     sharegpt_group = parser.add_argument_group("sharegpt dataset options")
