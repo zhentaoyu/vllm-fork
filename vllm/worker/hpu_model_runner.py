@@ -809,9 +809,11 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             # token_ids of "### Question:" of llama3.1-8b
             # hacky code for benchmark
             rag_suffix_tokens = [14711, 16225, 25]
+            # Qwen2:
+            # rag_suffix_tokens = [14374, 15846, 25]
             rs_len = 3
             # for chat completions
-            # template_end = [0, 1, 2]
+            # template_end = [151645, 198, 151644, 77091, 198]
             removed_template = False
             if origin_seq_len < rs_len:
                 # no rag token ids
