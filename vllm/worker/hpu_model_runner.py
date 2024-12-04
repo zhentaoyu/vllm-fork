@@ -777,6 +777,10 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         if len(seq_group_metadata_list) == 0:
             return PreparePromptMetadata.empty()
 
+        # TODO remove it for unified API
+        self.rag_start_pos = []
+        self.rag_end_pos = []
+
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
             seq_ids = list(seq_group_metadata.seq_data.keys())
@@ -799,6 +803,40 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             # it contains output tokens.
             seq_len = min(seq_data.get_len(), context_len + token_chunk_size)
             prompt_tokens = seq_data.get_token_ids()[context_len:seq_len]
+
+            # TODO remove it for unified API
+            origin_seq_len = len(prompt_tokens)
+            # token_ids of "### Question:" of llama3.1-8b
+            # hacky code for benchmark
+            rag_suffix_tokens = [14711, 16225, 25]
+            rs_len = 3
+            # for chat completions
+            # template_end = [0, 1, 2]
+            removed_template = False
+            if origin_seq_len < rs_len:
+                # no rag token ids
+                self.rag_start_pos.append(-1)
+                self.rag_end_pos.append(-1)
+            else:
+                for i in reversed(range(origin_seq_len)):
+                    if i - rs_len >= 0:
+                        if [prompt_tokens[i - 2],
+                            prompt_tokens[i - 1],
+                            prompt_tokens[i]] == rag_suffix_tokens:
+                            self.rag_start_pos.append(0)
+                            self.rag_end_pos.append(i)
+                            # remove template_end tokens in rag save phase
+                            #    if (i != origin_seq_len - 1) and (i + len(template_end) == origin_seq_len -1):
+                            #        if prompt_tokens[i + 1:] == template_end:
+                            #            prompt_tokens = prompt_tokens[:i+1]
+                            #            removed_template = True
+                            break
+                    else:
+                        self.rag_start_pos.append(-1)
+                        self.rag_end_pos.append(-1)
+                        break
+            # only change seq_len in rag_save phase with chat template
+            seq_len = min(seq_len, len(prompt_tokens)) if removed_template else seq_len
             seq_lens.append(seq_len)
 
             # NOTE: This only works for oooooooxxx style attention.
@@ -912,40 +950,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         else:
             prefix_block_list_tensor = None
 
-        # token_ids of "### Question:" of llama3.1-8b
-        # hacky code for benchmark
-        # TODO remove it for unified API
-        rag_suffix_tokens = [14711, 16225, 25]
-        rs_len = 3
-        # for chat completions
-        # template_end = [0, 1, 2]
-        self.rag_start_pos = []
-        self.rag_end_pos = []
-        for idx in range(len(input_tokens)):
-            seq_len = len(input_tokens[idx])
-            if seq_len < rs_len:
-                # no rag token ids
-                self.rag_start_pos.append(-1)
-                self.rag_end_pos.append(-1)
-                continue
-            else:
-                for i in reversed(range(seq_len)):
-                    if i - rs_len >= 0:
-                       if [input_tokens[idx][i - 2],
-                           input_tokens[idx][i - 1],
-                           input_tokens[idx][i]] == rag_suffix_tokens:
-                           self.rag_start_pos.append(0)
-                           self.rag_end_pos.append(i)
-                           # remove template_end tokens in rag save phase
-                        #    if (i != seq_len - 1) and (i + len(template_end) == seq_len -1):
-                        #        if input_tokens[idx][i + 1:] == template_end:
-                        #            input_tokens[idx] = input_tokens[idx][:i+1]
-                           break
-                    else:
-                        self.rag_start_pos.append(-1)
-                        self.rag_end_pos.append(-1)
-                        break
         logger.debug(f"rag_start_pos: {self.rag_start_pos}, rag_end_pos: {self.rag_end_pos}")
+        logger.debug(f"seq_lens {seq_lens}, query_lens {query_lens}")
 
         input_tokens = make_tensor_with_pad(input_tokens,
                                             max_len=max_prompt_len,
