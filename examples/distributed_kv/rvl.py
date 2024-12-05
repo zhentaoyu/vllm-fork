@@ -7,6 +7,10 @@ import requests
 from tqdm import tqdm
 import math
 import logging
+import os
+
+log_level = os.getenv('LOGLEVEL', 'INFO')
+logging.basicConfig(level=log_level.upper(), format='%(asctime)s - %(levelname)s - %(message)s')
 
 def get_service_cluster_ip(service_name):
     try:
@@ -89,46 +93,52 @@ If you don't know the answer to a question, please don't share false information
     return template
 
 
-def check_db(redis_conn):
-    print("CHECKING DB CONTENT------------------------------------------")    
+def retriever_content(redis_conn):
+    logging.info("CHECKING DB CONTENT------------------------------------------")    
     num_docs = int(redis_conn.ft("rag-redis").info()['num_docs'])
-    page_size = 1000
+    page_size = 5000
     total_page = math.ceil(num_docs / page_size)
-    print(f"num_docs: {num_docs}, total_page: {total_page}, page_size:{page_size}")
+    logging.info(f"num_docs: {num_docs}, total_page: {total_page}, page_size:{page_size}")
     redis_conn.execute_command("FT.CONFIG", "SET", "MAXSEARCHRESULTS", str(num_docs))
 
     query = Query("*").paging(0, page_size)
     cursor = 0
 
-    num_searched_docs=1
-    while True:
-        results = redis_conn.ft('rag-redis').search(query)
+    doc_dict= {}
+    with tqdm(total=num_docs, desc="Processing documents") as pbar:
+        while True:
+            results = redis_conn.ft('rag-redis').search(query)
 
-        for doc in results.docs:
-            num_searched_docs = num_searched_docs + 1
-            print(num_searched_docs, doc.id, doc.content)
+            for doc in results.docs:
+                # print(doc.id, doc.content)
+                doc_dict[doc.id] = doc.content
+                pbar.update(1)
 
-        if len(results.docs) < page_size:
-            print(len(results.docs), page_size)
-            break
+            if len(results.docs) < page_size:
+                print(f"End of results. The last page retrieved {len(results.docs)} documents.")
+                break
 
-        cursor += 1
-        query.paging(cursor * page_size, page_size)
+            cursor += 1
+            query.paging(cursor * page_size, page_size)
+        
+    return doc_dict
 
 
-def offload_db(model="Qwen/Qwen2-7B-Instruct", mode=None):
+def offloading(doc_dict, model="Qwen/Qwen2-7B-Instruct", template="en", mode=None):
     svc_ip, port = get_service_cluster_ip("llm-dependency-svc")
     llm_url = f"http://{svc_ip}:{port}/v1/chat/completions"
     headers = {
         "Content-Type": "application/json"
     }
 
-    for data in tqdm(results.docs):
-        search_result = data['content']
-
+    doc_index = 0
+    for doc_id, doc_content in tqdm(doc_dict.items()):
+        search_result = doc_content
+        logging.info(f"doc_index: {doc_index}, doc_id: {doc_id}, doc_content: {doc_content}")
+        doc_index += 1
         template = get_template("en")
         prompt = template.format(context=search_result)
-        print(f"{prompt}")
+        logging.info(f"prompt: \n {prompt}")
         data = {
             "model": model,
             "messages": [
@@ -137,7 +147,7 @@ def offload_db(model="Qwen/Qwen2-7B-Instruct", mode=None):
                     "content": prompt
                 }
             ],
-            "max_completion_tokens": 256,
+            "max_completion_tokens": 128,
         }
 
         response = requests.post(llm_url, headers=headers, json=data)
@@ -148,10 +158,11 @@ def offload_db(model="Qwen/Qwen2-7B-Instruct", mode=None):
             continue
             #print("Response Body:", response.text)
         else:
-            print("ERROR")
+            logging.info("ERROR")
+            break
         
             
-def rag_test(model="Qwen/Qwen2-7B-Instruct", mode=None):
+def rag_test(doc_dict, model="Qwen/Qwen2-7B-Instruct", mode=None):
     svc_ip, port = get_service_cluster_ip("llm-dependency-svc")
     llm_url = f"http://{svc_ip}:{port}/v1/chat/completions"
     headers = {
@@ -159,11 +170,12 @@ def rag_test(model="Qwen/Qwen2-7B-Instruct", mode=None):
     }
 
     user_prompt = "please summarize above."
-    for data in tqdm(results.docs):
-        search_result = data['content']
+    for doc_id, doc_content in tqdm(doc_dict.items()):
+        search_result = doc_content
+        logging.info(f"doc_id: {doc_id}, doc_content: {doc_content}")
         template = get_template("en_test")
         prompt = template.format(context=search_result, question=user_prompt)
-        print(f"{prompt}")
+        logging.info(f"{prompt}")
         data = {
             "model": model,
             "messages": [
@@ -182,7 +194,8 @@ def rag_test(model="Qwen/Qwen2-7B-Instruct", mode=None):
             continue
             #print("Response Body:", response.text)
         else:
-            print("ERROR")
+            logging.info("ERROR")
+            break
         
 
 def e2e_request():
@@ -204,10 +217,11 @@ def e2e_request():
     
 # e2e_request()
 
-def one_iter_test():
-    offload_db(mode="test")
+def one_iter_test(doc_dict):
+    offloading(doc_dict, mode="test")
     print("RAG TEST ------------------------------------------------")
-    rag_test(mode="test")
+    rag_test(doc_dict, mode="test")
+    
 
 
 svc_ip, port = get_service_cluster_ip("vector-db")
@@ -216,6 +230,11 @@ redis_conn = Redis.from_url(redis_url)
 
 vector_index = SearchIndex.from_existing(name="rag-redis", redis_client=redis_conn)
 results = vector_index.search(query="*")
+doc_dict = retriever_content(redis_conn)
 
 # one_iter_test()
-check_db(redis_conn)
+
+logging.info(f"len(doc_dict) = {len(doc_dict)} results.total = {results.total}")
+#one_iter_test(doc_dict)
+
+offloading(doc_dict)
