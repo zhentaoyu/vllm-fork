@@ -5,7 +5,7 @@
 
 export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
 export VLLM_PORT=12345
-model="mQwen/Qwen2-7B-Instruct"
+model="Qwen/Qwen2-7B-Instruct"
 
 # install quart first -- required for disagg prefill proxy serve
 if python3 -c "import quart" &> /dev/null; then
@@ -30,7 +30,7 @@ export VLLM_KV_TRANSFER_DRIVER="disk_kv_transfer"
 # prefilling instance, which is the KV producer
 VLLM_DISTRIBUTED_KV_ROLE=producer CUDA_VISIBLE_DEVICES=0 python3 \
     -m vllm.entrypoints.openai.api_server \
-    --model mQwen/Qwen2-7B-Instruct \
+    --model Qwen/Qwen2-7B-Instruct \
     --port 8100 \
     --max-model-len 10000 \
     --gpu-memory-utilization 0.8 &
@@ -38,7 +38,7 @@ VLLM_DISTRIBUTED_KV_ROLE=producer CUDA_VISIBLE_DEVICES=0 python3 \
 # decoding instance, which is the KV consumer
 VLLM_DISTRIBUTED_KV_ROLE=consumer CUDA_VISIBLE_DEVICES=1 python3 \
     -m vllm.entrypoints.openai.api_server \
-    --model mQwen/Qwen2-7B-Instruct \
+    --model Qwen/Qwen2-7B-Instruct \
     --port 8200 \
     --max-model-len 10000 \
     --gpu-memory-utilization 0.8 &
@@ -60,7 +60,7 @@ sleep 1
 output1=$(curl -s http://localhost:8000/v1/completions \
 -H "Content-Type: application/json" \
 -d '{
-"model": "mQwen/Qwen2-7B-Instruct",
+"model": "Qwen/Qwen2-7B-Instruct",
 "prompt": "San Francisco is a",
 "max_tokens": 10,
 "temperature": 0
@@ -69,7 +69,7 @@ output1=$(curl -s http://localhost:8000/v1/completions \
 output2=$(curl -s http://localhost:8000/v1/completions \
 -H "Content-Type: application/json" \
 -d '{
-"model": "mQwen/Qwen2-7B-Instruct",
+"model": "Qwen/Qwen2-7B-Instruct",
 "prompt": "Santa Clara is a",
 "max_tokens": 10,
 "temperature": 0
@@ -79,7 +79,7 @@ output3=$(curl -s http://localhost:8000/v1/chat/completions \
 -H "Content-Type: application/json" \
 -d @- <<EOF
 {
-"model": "mQwen/Qwen2-7B-Instruct",
+"model": "Qwen/Qwen2-7B-Instruct",
 "messages": [{"role": "user", "content": "Tell me something about Intel"}],
 "max_completion_tokens": 10,
 "temperature": 0
