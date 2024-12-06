@@ -29,7 +29,8 @@ from torch.distributed import Backend
 from vllm_hpu_extension import cache_ops as ops
 
 if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForHPUWithSamplingMetadata as ModelInputForHPUWithSamplingMetadata
+    from vllm.worker.hpu_model_runner import (ModelInputForHPUWithSamplingMetadata, HpuModelAdapter)
+
 
 import vllm.envs as envs
 from vllm.distributed.kv_transfer.kv_lookup_buffer.base import (
@@ -85,6 +86,9 @@ class KV_transfer_agent:
             "VLLM_KV_TRANSFER_DRIVER can only be simple_buffer or disk_kv_transfer."
         self.kv_transfer_driver = envs.VLLM_KV_TRANSFER_DRIVER
         logger.debug(f"kv_transfer_driver is {self.kv_transfer_driver}")
+
+        self.load_chunk_cache = (envs.VLLM_KV_TRANSFER_CHUNK_CACHE and IS_KV_PRODUCER)
+        logger.debug(f"load_chunk_cache is {self.load_chunk_cache}")
 
         # TODO other block size
         self.block_size = 128
@@ -176,13 +180,14 @@ class KV_transfer_agent:
 
     def send_kv_caches_and_hidden_states(
         self,
-        model_executable: torch.nn.Module,
+        model_executable: "HpuModelAdapter",
         model_input: "ModelInputForHPUWithSamplingMetadata",
         kv_caches: List[torch.Tensor],
         hidden_or_intermediate_states: Union[torch.Tensor,
                                              IntermediateTensors],
     ) -> None:
 
+        torch_model = model_executable.model
         input_tokens_tensor = model_input.input_tokens
         seq_lens = model_input.seq_lens
         # query_lens = model_input.query_lens
@@ -192,12 +197,12 @@ class KV_transfer_agent:
             input_tokens_tensor = self.original_input_tokens_t
             slot_mapping = self.original_slot_mapping
         try:
-            start_layer = model_executable.model.start_layer
-            end_layer = model_executable.model.end_layer
+            start_layer = torch_model.model.start_layer
+            end_layer = torch_model.model.end_layer
         except:
             # no pipeline parallelism
             start_layer = 0
-            end_layer = len(model_executable.model.layers)
+            end_layer = len(torch_model.model.layers)
 
         # query_lens contains new KV caches that are added to vLLM.
         # so we will send them to decode instance
@@ -252,7 +257,8 @@ class KV_transfer_agent:
     # both prefill instance and decode instance may receive (part) kv cache
     # in their first-token stages
     def recv_kv_caches_and_hidden_states(
-        self, model_executable: torch.nn.Module,
+        self,
+        model_executable: "HpuModelAdapter",
         model_input: "ModelInputForHPUWithSamplingMetadata",
         kv_caches: List[torch.Tensor]
     ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
@@ -264,6 +270,7 @@ class KV_transfer_agent:
         # and hidden states.
         bypass_model_exec = True
 
+        torch_model = model_executable.model
         input_tokens_tensor = model_input.input_tokens
         seq_lens = model_input.seq_lens
         slot_mapping = model_input.attn_metadata.slot_mapping
@@ -282,12 +289,12 @@ class KV_transfer_agent:
         start_pos_list = []
 
         try:
-            start_layer = model_executable.model.start_layer
-            end_layer = model_executable.model.end_layer
+            start_layer = torch_model.model.start_layer
+            end_layer = torch_model.model.end_layer
         except:
             # no pipeline parallelism
             start_layer = 0
-            end_layer = len(model_executable.model.layers)
+            end_layer = len(torch_model.model.layers)
 
         # enumerate different requests
         # FIXME(Kuntai): This impl assumes that all requests are prefill.
@@ -334,7 +341,9 @@ class KV_transfer_agent:
                 roi_len = slen if rag_end_pos[idx] == -1 else (rag_end_pos[idx] + 1)
                  # hccl can not send bool, so use int type instead
                 roi = torch.ones(roi_len, dtype=torch.int32, device=current_tokens.device)
-                ret = self.recv_buffer.drop_select(current_tokens, roi)
+                ret = self.recv_buffer.drop_select(current_tokens,
+                                                   roi,
+                                                   load_chunk_cache=self.load_chunk_cache)
                 if ret[0] is None:
                     # didn't find any match.
                     bypass_model_exec = False
@@ -366,6 +375,16 @@ class KV_transfer_agent:
                     continue
                 # (whole or part tokens) cache hit
                 else:
+                    if self.load_chunk_cache:
+                        chunk_pos_ids = ret[-1]
+                        # re-rope
+                        # shift delta position for each chunk k cache
+                        keys = _apply_k_cache_rerope(keys,
+                                                     chunk_pos_ids,
+                                                     model_executable,
+                                                     start_layer,
+                                                     end_layer)
+
                     # update the end position based on how many tokens are cached.
                     end_pos = start_pos + num_computed_tokens
 
@@ -425,6 +444,58 @@ class KV_transfer_agent:
 
         return hidden_or_intermediate_states, bypass_model_exec, model_input
 
+def _apply_k_cache_rerope(k_cache, chunk_position_ids, model_executable, start_layer, end_layer):
+    from habana_frameworks.torch.hpex.kernels import (
+            RotaryPosEmbeddingMode, apply_rotary_pos_emb)
+
+    rope = _get_model_executable_rope(model_executable)
+    seq_len = k_cache.size(1)
+    position_ids = torch.arange(0, seq_len, device=chunk_position_ids.device).view(1, -1)
+    position_ids = position_ids - chunk_position_ids
+    logger.debug(f"position_ids {position_ids}")
+    rope.prepare_cos_sin(position_ids)
+    is_neox_style = rope.is_neox_style
+    sin = rope.sin
+    cos = rope.cos
+    num_tokens = seq_len
+    head_size = rope.head_size
+    rotary_dim = rope.rotary_dim
+
+    # HPU RoPE kernel requires hidden dimension for cos and sin to be equal
+    # to query hidden dimension, so the original tensors need to be
+    # expanded
+    # GPT-NeoX kernel requires position_ids = None, offset, mode = BLOCKWISE
+    # and expansion of cos/sin tensors via concatenation
+    # GPT-J kernel requires position_ids = None, offset = 0, mode = PAIRWISE
+    # and expansion of cos/sin tensors via repeat_interleave
+    rope_mode: RotaryPosEmbeddingMode
+    if is_neox_style:
+        rope_mode = RotaryPosEmbeddingMode.BLOCKWISE
+    else:
+        rope_mode = RotaryPosEmbeddingMode.PAIRWISE
+    for i in range(start_layer, end_layer):
+        key = k_cache[i - start_layer].to("hpu")
+        key_shape = key.shape
+        key = key.view(num_tokens, -1, head_size)
+        key_rot = key[..., :rotary_dim]
+        key_pass = key[..., rotary_dim:]
+        key_rot = apply_rotary_pos_emb(key_rot, cos, sin, None, 0, rope_mode)
+        key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+        k_cache[i - start_layer] = key
+
+    return k_cache
+
+def _get_model_executable_rope(model_executable):
+    model_name = model_executable.layer_names['model_name']
+    layers_name = model_executable.layer_names['layers_name']
+    attn_name = model_executable.layer_names['attn_name']
+    rope_name = model_executable.layer_names['rope_name']
+
+    base_model = getattr(model_executable.model, model_name)
+    first_model_layer = getattr(base_model, layers_name)[0]
+    attention_layer = getattr(first_model_layer, attn_name)
+    rope = getattr(attention_layer, rope_name)
+    return rope
 
 def _get_indices_and_offsets(slot_mapping, block_size):
     sm_flatten = slot_mapping.flatten()

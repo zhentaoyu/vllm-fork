@@ -40,16 +40,15 @@ class DiskKVTransfer(KVLookupBufferBase):
                     logger.warning(f"Can not find DiskKVTransfer work_dir_path {self.work_dir}.")
             self.init_work_dir = True
 
-    def _encode_tensors(self, input_tokens: torch.Tensor, roi: torch.Tensor) -> str:
-
-        # tensor1_clone = tensor1.clone()
-        # tensor2_clone = tensor2.clone()
-        # tensor1_bytes = tensor1.cpu().numpy().tobytes()
-        # tensor2_bytes = tensor2.cpu().numpy().tobytes()
-        t0 = time.perf_counter()
+    def _get_roi_tokens(self, input_tokens: torch.Tensor, roi: torch.Tensor) -> torch.Tensor:
         # longest continuous tokens
         roi_indices = torch.arange(0, roi.size(-1), device=input_tokens.device)
         roi_tokens = input_tokens.index_select(-1, roi_indices)
+        return roi_tokens
+
+    def _encode_tensors(self, roi_tokens: torch.Tensor) -> str:
+
+        t0 = time.perf_counter()
         combined_bytes = roi_tokens.cpu().numpy().tobytes()
         # torch.hpu.synchronize()
         logger.debug(f"2 tensors to bytes time is {time.perf_counter() - t0}")
@@ -60,6 +59,10 @@ class DiskKVTransfer(KVLookupBufferBase):
         logger.debug(f"gen hash key time is {time.perf_counter() - t0}")
 
         return hash_value
+
+    def _get_tensot_key(self, input_tensor: torch.Tensor) -> str:
+        tensor_key = self._encode_tensors(input_tensor) + "_" + str(self.local_rank)
+        return tensor_key
 
     def _save_tensor(self, tensor: torch.Tensor, name: str,
                      device: Union[str, torch.device]) -> None:
@@ -102,38 +105,116 @@ class DiskKVTransfer(KVLookupBufferBase):
         self._work_dir_init("save")
 
         t0 = time.perf_counter()
-        tensor_key = self._encode_tensors(input_tokens, roi) + "_" + str(self.local_rank)
+        roi_tokens = self._get_roi_tokens(input_tokens, roi)
+        tensor_key = self._get_tensot_key(roi_tokens)
         logger.debug(f"tensor hash time is {time.perf_counter() - t0}")
-        key_path = os.path.join(self.work_dir, tensor_key + "_key.pt")
-        val_path = os.path.join(self.work_dir, tensor_key + "_value.pt")
-        hid_path = os.path.join(self.work_dir, tensor_key + "_hidden.pt")
 
-        self._save_tensor(key, key_path, self.send_device)
-        self._save_tensor(value, val_path, self.send_device)
-        self._save_tensor(hidden, hid_path, self.send_device)
+        self._save_kv_to_disk(key, value, hidden, tensor_key)
 
     def drop_select(self, input_tokens: torch.Tensor,
-                    roi: torch.Tensor) -> List[Optional[torch.Tensor]]:
+                    roi: torch.Tensor,
+                    load_chunk_cache: bool = False) -> List[Optional[torch.Tensor]]:
 
         self._work_dir_init("load")
+        self.recv_device = input_tokens.device
 
         t0 = time.perf_counter()
-        tensor_key = self._encode_tensors(input_tokens, roi) + "_" + str(self.local_rank)
+        roi_tokens = self._get_roi_tokens(input_tokens, roi)
+        tensor_key = self._get_tensot_key(roi_tokens)
         logger.debug(f"tensor hash time is {time.perf_counter() - t0}")
-        key_path = os.path.join(self.work_dir, tensor_key + "_key.pt")
-        val_path = os.path.join(self.work_dir, tensor_key + "_value.pt")
-        hid_path = os.path.join(self.work_dir, tensor_key + "_hidden.pt")
 
-        self.recv_device = input_tokens.device
-        key = self._load_tensor(key_path, self.recv_device)
-        val = self._load_tensor(val_path, self.recv_device)
-        hid = self._load_tensor(hid_path, self.recv_device)
+        chunk_pos_ids = None
+        if not load_chunk_cache:
+            key, val, hid = self._load_kv_from_disk(tensor_key)
+        else:
+            # load piecewise kv cache and concat them
+            key, val, hid, chunk_pos_ids = self._load_chunk_kv_and_concat(input_tokens, roi)
 
-        res = [input_tokens, roi, key, val, hid]
+        res = [input_tokens, roi, key, val, hid, chunk_pos_ids]
         if any(r is None for r in res):
-            res = [None] * 5
+            res = [None] * 6
 
         return res
 
     def close(self):
         pass
+
+    def _load_kv_from_disk(self, tensor_key):
+        key_path = os.path.join(self.work_dir, tensor_key + "_key.pt")
+        val_path = os.path.join(self.work_dir, tensor_key + "_value.pt")
+        hid_path = os.path.join(self.work_dir, tensor_key + "_hidden.pt")
+
+        key = self._load_tensor(key_path, self.recv_device)
+        val = self._load_tensor(val_path, self.recv_device)
+        hid = self._load_tensor(hid_path, self.recv_device)
+
+        return (key, val, hid)
+
+    def _save_kv_to_disk(self, key, val, hid, tensor_key):
+        key_path = os.path.join(self.work_dir, tensor_key + "_key.pt")
+        val_path = os.path.join(self.work_dir, tensor_key + "_value.pt")
+        hid_path = os.path.join(self.work_dir, tensor_key + "_hidden.pt")
+
+        self._save_tensor(key, key_path, self.send_device)
+        self._save_tensor(val, val_path, self.send_device)
+        self._save_tensor(hid, hid_path, self.send_device)
+
+    def _load_chunk_kv_and_concat(self, input_tokens, roi):
+        # simulate chunk kv cache load
+        # it's just for POC and will be replaced with kv cache transfer engine
+        # modify it when knowledge content or model name change
+        chunk_flags = [
+            [7542, 3059, 25],    # system_prompt + rag_prefix
+            [11715, 6957, 13],   # rag_0
+            [311, 10515, 13],    # rag_1
+            [14374, 15846, 25],  # rag_2 + prompt_prefix
+        ]
+
+        roi_tokens = self._get_roi_tokens(input_tokens, roi)
+        chunk_start_pos = 0
+        key, value, hidden = [], [], None
+        chunk_position_ids = []
+        for i in range(len(chunk_flags)):
+            chunk_flag = chunk_flags[i]
+            chunk_token = self._get_chunk_token(roi_tokens[chunk_start_pos:], chunk_flag)
+            # no chunk matched
+            # logger.debug(f"chunk_token {chunk_token}")
+            if chunk_token is None:
+                return (None, None, None, None)
+            chunk_start_pos += len(chunk_token)
+            # logger.debug(f"chunk_token length {len(chunk_token)}, chunk_start_pos {chunk_start_pos}")
+            chunk_token_key = self._get_tensot_key(chunk_token)
+            chunk_key, chunk_val, chunk_hid = self._load_kv_from_disk(chunk_token_key)
+            chunk_pos_id = torch.arange(0, len(chunk_token), device=chunk_key.device).unsqueeze(0)
+            # no found
+            if any(r is None for r in [chunk_key, chunk_val, chunk_hid]):
+                return (None, None, None, None)
+
+            key.append(chunk_key)
+            value.append(chunk_val)
+            hidden = chunk_hid
+            chunk_position_ids.append(chunk_pos_id)
+
+        roi_key = torch.cat(key, dim=1)
+        roi_value = torch.cat(value, dim=1)
+        # use last chunk for hidden_states
+        roi_hidden = hidden
+        roi_chunk_pos_ids = torch.cat(chunk_position_ids, dim=1)
+
+        return (roi_key, roi_value, roi_hidden, roi_chunk_pos_ids)
+
+    def _get_chunk_token(self, roi_tokens, chunk_flag):
+        roi_tokens_list = roi_tokens.to("cpu").tolist()
+        roi_len = len(roi_tokens_list)
+        cf_len = len(chunk_flag)
+        if roi_len < cf_len:
+            return None
+        else:
+            for i in range(roi_len):
+                if i + cf_len <= roi_len:
+                    cmp_token = [roi_tokens_list[i + j] for j in range(cf_len)]
+                    if cmp_token == chunk_flag:
+                        chunk_token = roi_tokens[:i + cf_len]
+                        return chunk_token
+                else:
+                    return None

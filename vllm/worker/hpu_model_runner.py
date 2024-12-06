@@ -808,9 +808,10 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             origin_seq_len = len(prompt_tokens)
             # token_ids of "### Question:" of llama3.1-8b
             # hacky code for benchmark
-            rag_suffix_tokens = [14711, 16225, 25]
+            # Llama3.1-8b
+            # rag_suffix_tokens = [14711, 16225, 25]
             # Qwen2:
-            # rag_suffix_tokens = [14374, 15846, 25]
+            rag_suffix_tokens = [14374, 15846, 25]
             rs_len = 3
             # for chat completions
             # template_end = [151645, 198, 151644, 77091, 198]
@@ -953,7 +954,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             prefix_block_list_tensor = None
 
         logger.debug(f"rag_start_pos: {self.rag_start_pos}, rag_end_pos: {self.rag_end_pos}")
-        logger.debug(f"seq_lens {seq_lens}, query_lens {query_lens}")
 
         input_tokens = make_tensor_with_pad(input_tokens,
                                             max_len=max_prompt_len,
@@ -2051,6 +2051,12 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
             # we can skip prefilling on tokens that successfully received KV caches
             # NOTE: The receive operation is blocking
             bypass_model_exec = False
+
+            # if kv_caches[0] is not None:
+            #     from vllm.distributed.kv_transfer.vllm_hpu_adapter import _apply_k_cache_rerope
+            #     kk = torch.randn(32, 128, 8, 128, device="hpu")
+            #     import pdb; pdb.set_trace()
+            #     kkk = _apply_k_cache_rerope(kk, self.model, 0, 32)
             s0 = time.perf_counter()
             if num_steps == 1 and not warmup_mode and self.need_recv_kv(model_input, kv_caches):
                 if hasattr(self, "rag_end_pos"):
@@ -2062,7 +2068,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         # self.model is used to know which layer the current worker
                         # is working on, so that we can receive KV for only those
                         # layers.
-                        self.model.model,
+                        self.model,
                         model_input,
                         kv_caches=kv_caches
                     )
@@ -2180,7 +2186,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                         # self.model is used to know which layer the current
                         # worker is working on, so that we can send KV for only those
                         # layers.
-                        self.model.model,
+                        self.model,
                         model_input,
                         kv_caches,
                         hidden_states,

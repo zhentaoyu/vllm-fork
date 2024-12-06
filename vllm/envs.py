@@ -73,6 +73,7 @@ if TYPE_CHECKING:
     VLLM_USE_V1: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = False
     VLLM_KV_TRANSFER_DRIVER: str = "simple_buffer"
+    VLLM_KV_TRANSFER_CHUNK_CACHE: bool = False
 
 
 def get_default_cache_root():
@@ -395,9 +396,15 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_DISTRIBUTED_KV_ROLE", None),
 
     # Set the kv_transfer way (gpu--gpu, gpu-cpu-disk-gpu, etc.)
+    # choices: ["simple_buffer", "disk_kv_transfer"]
     # default is simple_buffer (gpu to gpu)
     "VLLM_KV_TRANSFER_DRIVER":
     lambda: os.getenv("VLLM_KV_TRANSFER_DRIVER", "simple_buffer"),
+
+    # If set, load piecewise kv cache from disk and concat them
+    # Only works with VLLM_KV_TRANSFER_DRIVER=disk_kv_transfer
+    "VLLM_KV_TRANSFER_CHUNK_CACHE":
+    lambda: bool(os.getenv("VLLM_KV_TRANSFER_CHUNK_CACHE", 0)),
 
     # If set, vllm will skip the deprecation warnings.
     "VLLM_NO_DEPRECATION_WARNING":
