@@ -131,7 +131,7 @@ class DiskKVTransfer(KVLookupBufferBase):
             key, val, hid, chunk_pos_ids = self._load_chunk_kv_and_concat(input_tokens, roi)
 
         res = [input_tokens, roi, key, val, hid, chunk_pos_ids]
-        if any(r is None for r in res):
+        if any(r is None for r in res[:-1]):
             res = [None] * 6
 
         return res

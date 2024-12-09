@@ -136,7 +136,7 @@ complexities of programming morality. \n"
 
 prompt_prefix="### Question:"
 
-user_input=" Who is Evelyn Zhang?"
+user_input=" What did Evelyn Zhang and her team do?"
 
 answer_prefix="\n### Answer:"
 
@@ -221,14 +221,14 @@ sleep 1
 input_text="${saved_system_prompt}${saved_rag_0}${saved_rag_1}${saved_rag_2}${user_input}${answer_prefix}"
 echo -e "${input_text}"
 
-for i in {1..1}; do
+for i in {1..2}; do
 output2=$(curl -s http://localhost:8000/v1/completions \
 -H "Content-Type: application/json" \
 -d @- <<EOF
 {
 "model": "Qwen/Qwen2-7B-Instruct",
 "prompt": "${input_text}",
-"max_tokens": 64,
+"max_tokens": 128,
 "temperature": 0,
 "stream": false
 }

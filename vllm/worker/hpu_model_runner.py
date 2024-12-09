@@ -809,9 +809,10 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             # token_ids of "### Question:" of llama3.1-8b
             # hacky code for benchmark
             # Llama3.1-8b
-            # rag_suffix_tokens = [14711, 16225, 25]
+            rag_suffix_tokens = [14711, 16225, 25]
             # Qwen2:
-            rag_suffix_tokens = [14374, 15846, 25]
+            if self.model.model.config.architectures[0] == "Qwen2ForCausalLM":
+                rag_suffix_tokens = [14374, 15846, 25]
             rs_len = 3
             # for chat completions
             # template_end = [151645, 198, 151644, 77091, 198]
