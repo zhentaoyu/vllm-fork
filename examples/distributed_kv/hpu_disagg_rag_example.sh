@@ -40,6 +40,9 @@ wait_for_server() {
 }
 
 export VLLM_KV_TRANSFER_DRIVER="disk_kv_transfer"
+# no FUSESDPA in pre-save kv cache period since prompt_attention_with_context has no FUSESDPA either
+# it seems would affect accuracy if turn FUSESDPA on
+export VLLM_PROMPT_USE_FUSEDSDPA=0
 
 # prefilling instance, which is the KV producer
  VLLM_DISTRIBUTED_KV_ROLE=producer python3 \
