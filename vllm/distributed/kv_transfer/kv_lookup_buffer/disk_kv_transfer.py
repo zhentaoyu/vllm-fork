@@ -170,6 +170,18 @@ class DiskKVTransfer(KVLookupBufferBase):
             [14374, 15846, 25],  # rag_2 + prompt_prefix
         ]
 
+        # chunk_flags = [
+        #     [7542, 3059, 25],          # system_prompt + rag_prefix
+        #     [99722, 101070, 100784],   # rag_0
+        #     [14374, 15846, 25],        # rag_1 + prompt_prefix
+        # ]
+
+        # chunk_flags = [
+        #     [7542, 3059, 25],         # system_prompt + rag_prefix
+        #     [32463, 100407, 99257],   # rag_0
+        #     [14374, 15846, 25],       # rag_1 + prompt_prefix
+        # ]
+
         roi_tokens = self._get_roi_tokens(input_tokens, roi)
         chunk_start_pos = 0
         key, value, hidden = [], [], None
@@ -185,11 +197,11 @@ class DiskKVTransfer(KVLookupBufferBase):
             # logger.debug(f"chunk_token length {len(chunk_token)}, chunk_start_pos {chunk_start_pos}")
             chunk_token_key = self._get_tensot_key(chunk_token)
             chunk_key, chunk_val, chunk_hid = self._load_kv_from_disk(chunk_token_key)
-            chunk_pos_id = torch.arange(0, len(chunk_token), device=chunk_key.device).unsqueeze(0)
             # no found
             if any(r is None for r in [chunk_key, chunk_val, chunk_hid]):
                 return (None, None, None, None)
 
+            chunk_pos_id = torch.arange(0, len(chunk_token), device=chunk_key.device).unsqueeze(0)
             key.append(chunk_key)
             value.append(chunk_val)
             hidden = chunk_hid

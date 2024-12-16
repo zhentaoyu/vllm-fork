@@ -44,6 +44,9 @@ wait_for_server() {
 
 export VLLM_KV_TRANSFER_DRIVER="disk_kv_transfer"
 export VLLM_KV_TRANSFER_CHUNK_CACHE=1
+# no FUSESDPA in pre-save kv cache period since prompt_attention_with_context has no FUSESDPA either
+# it seems would affect accuracy if turn FUSESDPA on
+export VLLM_PROMPT_USE_FUSEDSDPA=0
 
 # prefilling instance, which is the KV producer
  VLLM_DISTRIBUTED_KV_ROLE=producer python3 \
@@ -139,6 +142,14 @@ prompt_prefix="### Question:"
 user_input=" What did Evelyn Zhang and her team do?"
 
 answer_prefix="\n### Answer:"
+
+
+# chunk_flags = [
+#             [7542, 3059, 25],    # system_prompt + rag_prefix
+#             [11715, 6957, 13],   # rag_0
+#             [311, 10515, 13],    # rag_1
+#             [14374, 15846, 25],  # rag_2 + prompt_prefix
+#         ]
 
 # save knowledge (it coule be done offline)
 saved_system_prompt="${system_prompt}${rag_prefix}"
