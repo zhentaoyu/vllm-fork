@@ -379,6 +379,7 @@ class KV_transfer_agent:
                         chunk_pos_ids = ret[-1]
                         # re-rope
                         # shift delta position for each chunk k cache
+                        logger.debug("apply re-rope for chunk kv cache loading...")
                         keys = _apply_k_cache_rerope(keys,
                                                      chunk_pos_ids,
                                                      model_executable,

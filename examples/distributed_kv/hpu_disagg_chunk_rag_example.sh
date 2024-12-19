@@ -47,6 +47,7 @@ export VLLM_KV_TRANSFER_CHUNK_CACHE=1
 # no FUSESDPA in pre-save kv cache period since prompt_attention_with_context has no FUSESDPA either
 # it seems would affect accuracy if turn FUSESDPA on
 export VLLM_PROMPT_USE_FUSEDSDPA=0
+export VLLM_CONTIGUOUS_PA=false
 
 # prefilling instance, which is the KV producer
  VLLM_DISTRIBUTED_KV_ROLE=producer python3 \
